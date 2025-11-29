@@ -117,7 +117,7 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 {{template "head" .}}
 <h1>arXiv Cache</h1>
 <form class="search-form" action="/search" method="get" id="search-form">
-	<input type="text" name="q" id="search-input" placeholder="Search papers..." value="{{.Query}}" autocomplete="off">
+	<input type="text" name="q" id="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off">
 	<button type="submit">Search</button>
 </form>
 <div id="search-results" class="search-results"></div>
@@ -164,12 +164,43 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 		return div.innerHTML;
 	}
 
+	// Check if input looks like an arXiv ID or URL
+	function extractArxivID(input) {
+		input = input.trim();
+		// New format: YYMM.NNNNN or YYMM.NNNNNN
+		const newFormat = /^(\d{4}\.\d{4,6})$/;
+		if (newFormat.test(input)) return input;
+		// Old format: category/NNNNNNN
+		const oldFormat = /^([a-z-]+\/\d{7,})$/i;
+		if (oldFormat.test(input)) return input;
+		// URL patterns
+		const urlPattern = /arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,6}|[a-z-]+\/\d{7,})/i;
+		const match = input.match(urlPattern);
+		if (match) {
+			let id = match[1];
+			// Remove version suffix
+			id = id.replace(/v\d+$/, '');
+			return id;
+		}
+		return null;
+	}
+
 	function doSearch(query) {
 		if (!query.trim()) {
 			results.innerHTML = '';
 			recent.style.display = '';
 			return;
 		}
+
+		// Check if it's an arXiv ID - redirect immediately
+		const arxivID = extractArxivID(query);
+		if (arxivID) {
+			results.innerHTML = '<p class="search-status">Loading paper ' + escapeHtml(arxivID) + '...</p>';
+			recent.style.display = 'none';
+			window.location.href = '/paper/' + arxivID;
+			return;
+		}
+
 		results.innerHTML = '<p class="search-status">Searching...</p>';
 		recent.style.display = 'none';
 
@@ -191,6 +222,15 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	input.addEventListener('input', function() {
 		clearTimeout(timeout);
 		timeout = setTimeout(() => doSearch(input.value), 300);
+	});
+
+	// Also handle form submit for immediate redirect on arXiv IDs
+	document.getElementById('search-form').addEventListener('submit', function(e) {
+		const arxivID = extractArxivID(input.value);
+		if (arxivID) {
+			e.preventDefault();
+			window.location.href = '/paper/' + arxivID;
+		}
 	});
 })();
 </script>
@@ -887,6 +927,12 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if query looks like an arXiv ID or URL - redirect to paper page
+	if arxivID := extractArxivID(query); arxivID != "" {
+		http.Redirect(w, r, "/paper/"+arxivID, http.StatusFound)
+		return
+	}
+
 	ctx := r.Context()
 	papers, err := s.cache.Search(ctx, query, "", 100)
 	if err != nil {
@@ -1065,8 +1111,19 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 	id := path
 	paper, err := s.cache.GetPaper(ctx, id)
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		// Paper not in cache - check if it looks like a valid arXiv ID and auto-fetch
+		if isArxivID(id) {
+			// Fetch metadata and source
+			opts := &arxiv.DownloadOptions{DownloadPDF: false, DownloadSource: true}
+			paper, err = s.cache.FetchAndDownload(ctx, id, opts)
+			if err != nil {
+				http.Error(w, "Paper not found: "+err.Error(), http.StatusNotFound)
+				return
+			}
+		} else {
+			http.NotFound(w, r)
+			return
+		}
 	}
 
 	// Get citation count for this paper
@@ -1324,6 +1381,94 @@ func parseYYMM(yy, mm string) (year, month int) {
 		month = int(mm[0]-'0')*10 + int(mm[1]-'0')
 	}
 	return
+}
+
+// isArxivID checks if a string looks like a valid arXiv ID.
+// Matches: YYMM.NNNNN, YYMM.NNNNNN, or category/NNNNNNN (e.g., hep-th/9901001)
+func isArxivID(s string) bool {
+	s = strings.TrimSpace(s)
+	// New format: YYMM.NNNNN or YYMM.NNNNNN
+	if idx := strings.Index(s, "."); idx == 4 {
+		yymm := s[:4]
+		rest := s[5:]
+		// Check YYMM is numeric
+		for _, c := range yymm {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		// Check rest is numeric and reasonable length (5-6 digits)
+		if len(rest) < 4 || len(rest) > 6 {
+			return false
+		}
+		for _, c := range rest {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	// Old format: category/NNNNNNN (e.g., hep-th/9901001)
+	if idx := strings.Index(s, "/"); idx > 0 {
+		rest := s[idx+1:]
+		if len(rest) >= 7 {
+			for _, c := range rest {
+				if c < '0' || c > '9' {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// extractArxivID extracts an arXiv ID from various input formats:
+// - Plain ID: "2301.00001" -> "2301.00001"
+// - URL: "https://arxiv.org/abs/2301.00001" -> "2301.00001"
+// - URL with version: "https://arxiv.org/abs/2301.00001v2" -> "2301.00001"
+// - PDF URL: "https://arxiv.org/pdf/2301.00001.pdf" -> "2301.00001"
+// Returns empty string if no valid ID found.
+func extractArxivID(input string) string {
+	input = strings.TrimSpace(input)
+
+	// Check if it's already a valid ID
+	if isArxivID(input) {
+		return input
+	}
+
+	// Try to extract from URL
+	// Patterns: arxiv.org/abs/ID, arxiv.org/pdf/ID, export.arxiv.org/abs/ID
+	for _, pattern := range []string{"/abs/", "/pdf/"} {
+		if idx := strings.Index(input, pattern); idx >= 0 {
+			id := input[idx+len(pattern):]
+			// Remove trailing .pdf if present
+			id = strings.TrimSuffix(id, ".pdf")
+			// Remove version suffix (v1, v2, etc.)
+			if vIdx := strings.LastIndex(id, "v"); vIdx > 0 {
+				// Check if everything after 'v' is numeric
+				allDigits := true
+				for _, c := range id[vIdx+1:] {
+					if c < '0' || c > '9' {
+						allDigits = false
+						break
+					}
+				}
+				if allDigits && len(id[vIdx+1:]) > 0 {
+					id = id[:vIdx]
+				}
+			}
+			// Remove any query params or fragments
+			if qIdx := strings.IndexAny(id, "?#"); qIdx >= 0 {
+				id = id[:qIdx]
+			}
+			if isArxivID(id) {
+				return id
+			}
+		}
+	}
+
+	return ""
 }
 
 func (s *server) handleCategory(w http.ResponseWriter, r *http.Request) {
