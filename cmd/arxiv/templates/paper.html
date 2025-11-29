@@ -441,10 +441,6 @@
 				// Re-setup click handlers and hovers
 				setupRefListHovers();
 				setupRefListClicks();
-				// Re-render any LaTeX in updated content
-				if (typeof MathJax !== 'undefined' && MathJax.typeset) {
-					MathJax.typeset();
-				}
 			});
 	}
 
