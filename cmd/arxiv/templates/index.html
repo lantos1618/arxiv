@@ -1,0 +1,123 @@
+{{define "index"}}
+{{template "head" .}}
+<h1>arXiv Cache</h1>
+<form class="search-form" action="/search" method="get" id="search-form">
+	<input type="text" name="q" id="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off">
+	<button type="submit">Search</button>
+</form>
+<div id="search-results" class="search-results"></div>
+<p>{{.Stats.TotalPapers}} papers cached ({{.Stats.SourcesDownloaded}} with source, {{.Stats.PDFsDownloaded}} with PDF)</p>
+<div id="recent-papers">
+<h2>Recent Papers</h2>
+{{range .Papers}}
+<div class="paper">
+	<span class="paper-id">{{.ID}}</span>
+	{{if .SourceDownloaded}}<span class="badge badge-src">src</span>{{end}}
+	{{if .PDFDownloaded}}<span class="badge badge-pdf">pdf</span>{{end}}
+	<div class="paper-title"><a href="/paper/{{.ID}}">{{.Title}}</a></div>
+	<div class="paper-authors">{{.Authors}}</div>
+	<div class="paper-categories">{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="/category/{{$c}}">{{$c}}</a>{{end}}</div>
+</div>
+{{else}}
+<p>No papers cached yet. Use <code>arxiv fetch</code> or <code>arxiv sync</code> to add papers.</p>
+{{end}}
+</div>
+<script>
+(function() {
+	const input = document.getElementById('search-input');
+	const results = document.getElementById('search-results');
+	const recent = document.getElementById('recent-papers');
+	let timeout = null;
+
+	function renderPaper(p) {
+		const cats = (p.categories || '').split(' ').filter(c => c).map(c =>
+			'<a class="cat-link" href="/category/' + c + '">' + c + '</a>'
+		).join(' ');
+		const badges = (p.src ? '<span class="badge badge-src">src</span>' : '') +
+		               (p.pdf ? '<span class="badge badge-pdf">pdf</span>' : '');
+		return '<div class="paper">' +
+			'<span class="paper-id">' + p.id + '</span> ' + badges +
+			'<div class="paper-title"><a href="/paper/' + p.id + '">' + escapeHtml(p.title) + '</a></div>' +
+			'<div class="paper-authors">' + escapeHtml(p.authors) + '</div>' +
+			'<div class="paper-categories">' + cats + '</div>' +
+		'</div>';
+	}
+
+	function escapeHtml(s) {
+		const div = document.createElement('div');
+		div.textContent = s;
+		return div.innerHTML;
+	}
+
+	// Check if input looks like an arXiv ID or URL
+	function extractArxivID(input) {
+		input = input.trim();
+		// New format: YYMM.NNNNN or YYMM.NNNNNN
+		const newFormat = /^(\d{4}\.\d{4,6})$/;
+		if (newFormat.test(input)) return input;
+		// Old format: category/NNNNNNN
+		const oldFormat = /^([a-z-]+\/\d{7,})$/i;
+		if (oldFormat.test(input)) return input;
+		// URL patterns
+		const urlPattern = /arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,6}|[a-z-]+\/\d{7,})/i;
+		const match = input.match(urlPattern);
+		if (match) {
+			let id = match[1];
+			// Remove version suffix
+			id = id.replace(/v\d+$/, '');
+			return id;
+		}
+		return null;
+	}
+
+	function doSearch(query) {
+		if (!query.trim()) {
+			results.innerHTML = '';
+			recent.style.display = '';
+			return;
+		}
+
+		// Check if it's an arXiv ID - redirect immediately
+		const arxivID = extractArxivID(query);
+		if (arxivID) {
+			results.innerHTML = '<p class="search-status">Loading paper ' + escapeHtml(arxivID) + '...</p>';
+			recent.style.display = 'none';
+			window.location.href = '/paper/' + arxivID;
+			return;
+		}
+
+		results.innerHTML = '<p class="search-status">Searching...</p>';
+		recent.style.display = 'none';
+
+		fetch('/search?format=json&q=' + encodeURIComponent(query))
+			.then(r => r.json())
+			.then(data => {
+				if (!data || data.length === 0) {
+					results.innerHTML = '<p class="search-status">No results for "' + escapeHtml(query) + '"</p>';
+					return;
+				}
+				results.innerHTML = '<p class="search-status">' + data.length + ' results for "' + escapeHtml(query) + '"</p>' +
+					data.map(renderPaper).join('');
+			})
+			.catch(err => {
+				results.innerHTML = '<p class="search-status">Search error</p>';
+			});
+	}
+
+	input.addEventListener('input', function() {
+		clearTimeout(timeout);
+		timeout = setTimeout(() => doSearch(input.value), 300);
+	});
+
+	// Also handle form submit for immediate redirect on arXiv IDs
+	document.getElementById('search-form').addEventListener('submit', function(e) {
+		const arxivID = extractArxivID(input.value);
+		if (arxivID) {
+			e.preventDefault();
+			window.location.href = '/paper/' + arxivID;
+		}
+	});
+})();
+</script>
+{{template "foot" .}}
+{{end}}

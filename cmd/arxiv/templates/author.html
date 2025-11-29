@@ -1,0 +1,18 @@
+{{define "author"}}
+{{template "head" .}}
+<h1>Papers by {{.Author}}</h1>
+<p>{{len .Papers}} papers found</p>
+{{range .Papers}}
+<div class="paper">
+	<span class="paper-id">{{.ID}}</span>
+	{{if .SourceDownloaded}}<span class="badge badge-src">src</span>{{end}}
+	{{if .PDFDownloaded}}<span class="badge badge-pdf">pdf</span>{{end}}
+	<div class="paper-title"><a href="/paper/{{.ID}}">{{.Title}}</a></div>
+	<div class="paper-authors">{{.Authors}}</div>
+	<div class="paper-categories">{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="/category/{{$c}}">{{$c}}</a>{{end}}</div>
+</div>
+{{else}}
+<p>No papers found for this author.</p>
+{{end}}
+{{template "foot" .}}
+{{end}}

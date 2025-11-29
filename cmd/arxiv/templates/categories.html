@@ -1,0 +1,14 @@
+{{define "categories"}}
+{{template "head" .}}
+<h1>Categories</h1>
+<p>{{len .Categories}} categories</p>
+<div class="categories-list">
+{{range .Categories}}
+<div class="cat-item">
+	<a href="/category/{{.Name}}">{{.Name}}</a>
+	<span class="cat-count">({{.Count}})</span>
+</div>
+{{end}}
+</div>
+{{template "foot" .}}
+{{end}}
