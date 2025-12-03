@@ -47,6 +47,7 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux := http.NewServeMux()
 
 	// API routes (before other routes for proper matching)
+	mux.HandleFunc("/api/v1/", srv.handleAPIRoot)
 	mux.HandleFunc("/api/v1/papers/", srv.handleAPIPaper)
 	mux.HandleFunc("/api/v1/search", srv.handleAPISearch)
 	mux.HandleFunc("/api/v1/search/pdf", srv.handleAPISearchPDF)
@@ -205,6 +206,22 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Query":  "",
 	}
 	templates.ExecuteTemplate(w, "index", data)
+}
+
+// handleAPIRoot renders a simple HTML overview for /api/v1/.
+// The actual JSON endpoints live under /api/v1/papers, /api/v1/search, etc.
+func (s *server) handleAPIRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/v1/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	base := arxiv.SiteBaseURL()
+	data := map[string]any{
+		"Title":   "API",
+		"BaseURL": base,
+	}
+	templates.ExecuteTemplate(w, "api", data)
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {

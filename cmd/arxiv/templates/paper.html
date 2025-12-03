@@ -104,7 +104,7 @@
 	</style>
 </head>
 <body>
-<div class="nav"><a href="/">Home</a> <a href="/categories">Categories</a></div>
+<div class="nav"><a href="/">Home</a> | <a href="/categories">Categories</a> | <a href="/api/v1/stats">API</a></div>
 
 <h1>{{.Paper.Title}}</h1>
 <div class="meta">
@@ -247,9 +247,10 @@
 
 	function getNodeColor(d) {
 		if (d.id === paperID) return '#1d4ed8';
-		if (!d.cached) return '#94a3b8';
 		const item = paperList.find(p => p.id === d.id);
+		// Citing should visually win even if it's also a reference or currently uncached
 		if (item && item.isCiting) return '#10b981';
+		if (!d.cached) return '#94a3b8';
 		return '#334155';
 	}
 
@@ -419,13 +420,19 @@
 		return fetch('/paper/' + paperID + '/refs')
 			.then(r => r.json())
 			.then(refs => {
-				// Update paperList for graph coloring
-				paperList = refs.map(r => ({
-					id: r.id,
-					isRef: true,
-					isCiting: false,
-					cached: r.hasTitle
-				}));
+				// Merge refs into paperList for graph coloring, preserving citing flags
+				const byId = new Map();
+				paperList.forEach(p => {
+					byId.set(p.id, { ...p });
+				});
+				refs.forEach(r => {
+					const existing = byId.get(r.id) || { id: r.id, isRef: false, isCiting: false, cached: false };
+					existing.isRef = true;
+					// Consider "cached" if we have a title or it was already cached from before
+					existing.cached = !!(r.hasTitle || existing.cached);
+					byId.set(r.id, existing);
+				});
+				paperList = Array.from(byId.values());
 
 				const refsList = document.getElementById('refs-list');
 				if (!refsList) return;
