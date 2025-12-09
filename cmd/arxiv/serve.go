@@ -68,8 +68,8 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 
 	// Setup middleware
-	cacheMW := newCacheMiddleware(5 * time.Minute) // Cache for 5 minutes
-	rateLimiter := newRateLimiter(100, time.Minute) // 100 requests per minute
+	cacheMW := newCacheMiddleware(5 * time.Minute)       // Cache for 5 minutes
+	rateLimiter := newRateLimiter(1000, time.Minute) // Allow higher burst per IP
 
 	// Apply middleware: rate limiting first, then caching
 	handler := rateLimiter.Handler(cacheMW.Handler(mux))
