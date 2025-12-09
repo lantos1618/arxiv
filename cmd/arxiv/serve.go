@@ -634,7 +634,7 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Reload paper metadata to get updated PDFPath
-		if p2, err := s.cache.GetPaper(ctx, paperID); err == nil {
+		if p2, err := s.cache.GetPaperFresh(ctx, paperID); err == nil {
 			paper = p2
 		}
 	}

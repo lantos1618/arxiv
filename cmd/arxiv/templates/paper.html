@@ -58,6 +58,7 @@
 		.btn:hover { background: #1e40af; text-decoration: none; }
 		.btn-secondary { background: #64748b; }
 		.btn-secondary:hover { background: #475569; }
+		.auto-fetch { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: #334155; }
 		.links { font-size: 0.875rem; margin-bottom: 1rem; }
 		.links a { margin-right: 1rem; }
 
@@ -116,7 +117,7 @@
 <div class="abstract">{{.Paper.Abstract}}</div>
 
 <div class="actions">
-	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}">View PDF</a>{{else}}<form style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary">Fetch PDF</button></form>{{end}}
+	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}">View PDF</a>{{else}}<form id="fetch-pdf-form" style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary" type="submit">Fetch PDF</button></form> <label class="auto-fetch"><input type="checkbox" id="auto-fetch-toggle"> Auto-fetch PDF on open</label> <span id="fetch-status" class="loading" style="display:none;">Fetching PDF...</span>{{end}}
 	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer">Open on arxiv.org</a>
 </div>
 {{if .FetchingSource}}<div class="loading" id="source-status">Fetching TeX source and extracting references...</div>{{end}}
@@ -174,9 +175,72 @@
 <script>
 (function() {
 	const paperID = "{{.Paper.ID}}";
+	const pdfDownloaded = {{if .Paper.PDFDownloaded}}true{{else}}false{{end}};
 	const container = document.getElementById('graph-container');
 	const tooltip = document.getElementById('tooltip');
 	let simulation, svg, g, nodes, links;
+
+	// Optional auto-fetch for PDF when user opts in
+	if (!pdfDownloaded) {
+		const fetchForm = document.getElementById('fetch-pdf-form');
+		const autoToggle = document.getElementById('auto-fetch-toggle');
+		const fetchStatus = document.getElementById('fetch-status');
+		const storageKey = 'autoFetchPDF';
+
+		function markFetching() {
+			if (fetchStatus) {
+				fetchStatus.style.display = 'inline';
+				fetchStatus.dataset.fetching = 'true';
+			}
+		}
+
+		function clearFetching(errText) {
+			if (fetchStatus) {
+				if (errText) {
+					fetchStatus.textContent = errText;
+				}
+				fetchStatus.style.display = errText ? 'inline' : 'none';
+				delete fetchStatus.dataset.fetching;
+			}
+		}
+
+		function triggerAutoFetch() {
+			if (!fetchForm || fetchStatus?.dataset.fetching) return;
+			markFetching();
+			fetch(fetchForm.action + '?return=' + encodeURIComponent(paperID), { method: 'POST' })
+				.then(resp => {
+					if (resp.redirected) {
+						window.location.href = resp.url;
+						return;
+					}
+					if (resp.ok) {
+						window.location.reload();
+						return;
+					}
+					return resp.text().then(t => Promise.reject(new Error(t)));
+				})
+				.catch(err => {
+					console.error('Auto-fetch PDF failed', err);
+					clearFetching('PDF fetch failed');
+				});
+		}
+
+		if (autoToggle) {
+			const saved = localStorage.getItem(storageKey) === 'true';
+			autoToggle.checked = saved;
+			autoToggle.addEventListener('change', () => {
+				localStorage.setItem(storageKey, autoToggle.checked ? 'true' : 'false');
+				if (autoToggle.checked) {
+					triggerAutoFetch();
+				} else {
+					clearFetching('');
+				}
+			});
+			if (saved) {
+				triggerAutoFetch();
+			}
+		}
+	}
 
 	// FLIP-style navigation with View Transitions API
 	function navigateWithTransition(element, url) {

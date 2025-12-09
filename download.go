@@ -50,6 +50,10 @@ func (c *Cache) DownloadPaper(ctx context.Context, paperID string, opts *Downloa
 		}
 		c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", paperID).
 			Updates(map[string]interface{}{"pdf_path": pdfPath, "pdf_downloaded": true})
+		// Keep in-memory cache consistent with the DB so handlers don't see stale paths.
+		paper.PDFPath = pdfPath
+		paper.PDFDownloaded = true
+		c.paperLRU.Put(paperID, paper)
 		
 		// Extract PDF text in background for search
 		go func() {
@@ -65,6 +69,9 @@ func (c *Cache) DownloadPaper(ctx context.Context, paperID string, opts *Downloa
 		}
 		c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", paperID).
 			Updates(map[string]interface{}{"src_path": srcPath, "src_downloaded": true})
+		paper.SourcePath = srcPath
+		paper.SourceDownloaded = true
+		c.paperLRU.Put(paperID, paper)
 
 		// Extract and store citations
 		if err := c.UpdateCitations(ctx, paperID, srcPath); err != nil {
@@ -93,6 +100,16 @@ func (c *Cache) GetPaper(ctx context.Context, id string) (*Paper, error) {
 	// Cache the result
 	c.paperLRU.Put(id, &p)
 
+	return &p, nil
+}
+
+// GetPaperFresh bypasses the LRU cache to force a DB read, then refreshes the cache.
+func (c *Cache) GetPaperFresh(ctx context.Context, id string) (*Paper, error) {
+	var p Paper
+	if err := c.db.WithContext(ctx).Where("id = ?", id).First(&p).Error; err != nil {
+		return nil, err
+	}
+	c.paperLRU.Put(id, &p)
 	return &p, nil
 }
 
