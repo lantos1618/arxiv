@@ -96,3 +96,14 @@ func (DownloadQueueItem) TableName() string {
 	return "download_queue"
 }
 
+// Embedding stores vector embeddings for semantic search.
+type Embedding struct {
+	PaperID string    `gorm:"primaryKey;column:paper_id"`
+	Model   string    `gorm:"column:model"`
+	Vector  []byte    `gorm:"type:blob;column:vector"`
+	Created time.Time `gorm:"column:created"`
+}
+
+func (Embedding) TableName() string {
+	return "embeddings"
+}
