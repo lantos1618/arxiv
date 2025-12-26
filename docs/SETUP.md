@@ -1,35 +1,116 @@
-# System Setup: Can This Box Handle It?
+# System Setup Guide
 
-## Your Hardware
+## Requirements
 
-- **RAM:** 15GB ✅
-- **CPU:** 8 cores ✅
-- **Disk:** 495GB free on /data ✅
-- **Tools:** Python 3.10, Go 1.18 ✅
+### Hardware
+- **RAM:** 8GB+ minimum (15GB+ recommended for large datasets)
+- **CPU:** 4+ cores (8+ recommended for embedding generation)
+- **Disk:** 100GB+ free space (500GB+ for full arXiv cache)
 
-## Can You Do It?
+### Software
+- **Go:** 1.18+ 
+- **Python:** 3.8+ (for embedding generation)
+- **SQLite:** 3.35+ (for FTS5 support)
 
-**YES.** You have more than enough.
+## Installation
 
-## What You Need
-
-1. **Generate embeddings** - Use open-source model (free) or OpenAI ($240 one-time)
-2. **Store embeddings** - ~5-6GB for 2.4M papers (fits easily on /data)
-3. **Vector search** - pgvector (PostgreSQL) or simple vector search
-
-## Recommended Setup
-
-- Store everything on `/data/arxiv/`
-- Start with subset of papers (10K-100K)
-- Test, then scale to full dataset
-- Use open-source embeddings (free) or OpenAI (faster)
-
-## Quick Test
-
+### 1. Build from Source
 ```bash
-pip3 install sentence-transformers
-python3 -c "from sentence_transformers import SentenceTransformer; model = SentenceTransformer('all-MiniLM-L6-v2'); print(len(model.encode('test')))"
+git clone https://github.com/tmc/arxiv.git
+cd arxiv
+make build
+sudo make install  # Optional: installs to /usr/local/bin
 ```
 
-If that works, you're ready.
+### 2. Dependencies
+```bash
+# For embedding generation (optional)
+pip3 install sentence-transformers numpy
+
+# For advanced features (optional)
+# PostgreSQL with pgvector extension for large-scale vector search
+```
+
+## Quick Start
+
+### 1. Initialize Cache
+```bash
+export ARXIV_CACHE=/path/to/cache  # Defaults to ~/.cache/arxiv
+arxiv sync -set cs                # Sync computer science papers (metadata only)
+```
+
+### 2. Fetch Papers
+```bash
+arxiv fetch 2301.00001           # Fetch single paper with source
+arxiv fetch -pdf 2301.00001      # Fetch with PDF
+arxiv fetch -all 2301.00001      # Fetch with source + PDF
+```
+
+### 3. Start Web Server
+```bash
+arxiv serve                      # Starts on http://localhost:8080
+arxiv serve -port 3000           # Custom port
+```
+
+## Production Setup
+
+### Large-Scale Deployment
+```bash
+# Use dedicated disk for cache
+export ARXIV_CACHE=/data/arxiv
+
+# Sync all categories (metadata only)
+arxiv sync
+
+# Generate embeddings for semantic search
+python3 tools/generate_embeddings.py --cache $ARXIV_CACHE
+
+# Start server with production settings
+arxiv serve -port 8080
+```
+
+### Environment Variables
+- `ARXIV_CACHE`: Cache directory path
+- `ARXIV_RATE_LIMIT`: API rate limit (default: 100 req/min)
+- `ARXIV_CACHE_SIZE`: LRU cache size in MB (default: 500)
+
+## Testing Setup
+
+```bash
+# Verify installation
+arxiv stats
+arxiv search "machine learning" -limit 5
+
+# Test web interface
+curl http://localhost:8080/api/v1/stats
+```
+
+## Troubleshooting
+
+### FTS5 Not Available
+If you get "FTS5 not available" errors:
+```bash
+# Upgrade SQLite or use the included binary
+sudo apt-get install sqlite3 libsqlite3-dev
+```
+
+### Memory Issues
+For large datasets:
+```bash
+# Reduce cache size
+export ARXIV_CACHE_SIZE=200
+
+# Use disk-based storage
+export ARXIV_CACHE=/data/arxiv
+```
+
+### Embedding Generation
+```bash
+# Test embedding model
+python3 -c "
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer('all-MiniLM-L6-v2')
+print('Model loaded, embedding dimension:', len(model.encode('test')))
+"
+```
 

@@ -14,6 +14,8 @@ import sqlite3
 import struct
 import sys
 from pathlib import Path
+
+import numpy as np
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
@@ -31,8 +33,26 @@ def deserialize_embedding(data):
     return np.frombuffer(data, dtype='float32')
 
 
-def generate_embeddings(cache_dir, model_name=MODEL_NAME, limit=None, batch_size=32):
-    """Generate embeddings for papers in the cache."""
+def generate_single_embedding(query, model_name=MODEL_NAME):
+    """Generate embedding for a single query string."""
+    import numpy as np
+    print(f"Loading model: {model_name}")
+    model = SentenceTransformer(model_name)
+    print(f"Model loaded. Embedding dimension: {model.get_sentence_embedding_dimension()}")
+    
+    # Generate embedding for the query
+    embedding = model.encode([query], convert_to_numpy=True)[0]
+    print(','.join(map(str, embedding.astype(np.float32))))
+
+
+def generate_embeddings(cache_dir, model_name=MODEL_NAME, limit=None, batch_size=32, query=None):
+    """Generate embeddings for papers in cache."""
+    
+    # If query is provided, generate single embedding
+    if query:
+        generate_single_embedding(query, model_name)
+        return
+    
     cache_path = Path(cache_dir)
     db_path = cache_path / "index.db"
     
@@ -47,6 +67,11 @@ def generate_embeddings(cache_dir, model_name=MODEL_NAME, limit=None, batch_size
     # Connect to database
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
+    
+    # If query is provided, generate single embedding
+    if query:
+        generate_single_embedding(query, model_name)
+        return
     
     # Check if embeddings table exists
     cursor.execute("""

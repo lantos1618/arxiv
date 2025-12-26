@@ -31,6 +31,26 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	"parseAuthors":    parseAuthors,
 	"parseCategories": parseCategories,
 	"arxivIDToDate":   arxivIDToDate,
+	"mul": func(a, b interface{}) float64 {
+		var aFloat, bFloat float64
+		switch v := a.(type) {
+		case int:
+			aFloat = float64(v)
+		case float64:
+			aFloat = v
+		case float32:
+			aFloat = float64(v)
+		}
+		switch v := b.(type) {
+		case int:
+			bFloat = float64(v)
+		case float64:
+			bFloat = v
+		case float32:
+			bFloat = float64(v)
+		}
+		return aFloat * bFloat
+	},
 }).ParseFS(templateFS, "templates/*.html"))
 
 func cmdServe(ctx context.Context, cacheDir string, args []string) {
@@ -50,9 +70,11 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/api/v1/", srv.handleAPIRoot)
 	mux.HandleFunc("/api/v1/papers/", srv.handleAPIPaper)
 	mux.HandleFunc("/api/v1/search", srv.handleAPISearch)
+	mux.HandleFunc("/api/v1/search/semantic", srv.handleAPISearchSemantic)
 	mux.HandleFunc("/api/v1/search/pdf", srv.handleAPISearchPDF)
 	mux.HandleFunc("/api/v1/categories", srv.handleAPICategories)
 	mux.HandleFunc("/api/v1/stats", srv.handleAPIStats)
+	mux.HandleFunc("/api/v1/embeddings/generate", srv.handleAPIGenerateEmbeddings)
 
 	// Web routes
 	mux.HandleFunc("/", srv.handleIndex)
@@ -68,7 +90,7 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 
 	// Setup middleware
-	cacheMW := newCacheMiddleware(5 * time.Minute)       // Cache for 5 minutes
+	cacheMW := newCacheMiddleware(5 * time.Minute)   // Cache for 5 minutes
 	rateLimiter := newRateLimiter(1000, time.Minute) // Allow higher burst per IP
 
 	// Apply middleware: rate limiting first, then caching
@@ -238,14 +260,16 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	papers, err := s.cache.Search(ctx, query, "", 100)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	searchMode := r.URL.Query().Get("search-mode")
+	isSemantic := searchMode == "semantic"
 
-	// JSON format for live search
 	if r.URL.Query().Get("format") == "json" {
+		papers, err := s.cache.Search(ctx, query, "", 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		type searchResult struct {
 			ID         string `json:"id"`
 			Title      string `json:"title"`
@@ -270,11 +294,63 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := map[string]any{
-		"Title":  "Search",
-		"Query":  query,
-		"Papers": papers,
+	var data map[string]any
+
+	if isSemantic {
+		count, err := s.cache.CountEmbeddings(ctx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if count == 0 {
+			data = map[string]any{
+				"Title":           "Search",
+				"Query":           query,
+				"IsSemantic":      true,
+				"NoEmbeddings":    true,
+				"Papers":          []arxiv.Paper{},
+				"SemanticResults": []arxiv.SemanticResult{},
+			}
+			templates.ExecuteTemplate(w, "search", data)
+			return
+		}
+
+		queryEmbedding, err := s.generateQueryEmbedding(query)
+		if err != nil {
+			http.Error(w, "Failed to generate query embedding: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
+		semanticResults, err := s.cache.SearchSemantic(ctx, queryEmbedding, 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		data = map[string]any{
+			"Title":           "Search",
+			"Query":           query,
+			"IsSemantic":      true,
+			"Papers":          []arxiv.Paper{},
+			"SemanticResults": semanticResults,
+		}
+	} else {
+		papers, err := s.cache.Search(ctx, query, "", 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		data = map[string]any{
+			"Title":           "Search",
+			"Query":           query,
+			"IsSemantic":      false,
+			"Papers":          papers,
+			"SemanticResults": []arxiv.SemanticResult{},
+		}
 	}
+
 	templates.ExecuteTemplate(w, "search", data)
 }
 

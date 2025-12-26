@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	_ "modernc.org/sqlite"
 )
 
 // Cache manages a local offline cache of arXiv papers.
@@ -32,13 +34,11 @@ func Open(root string) (*Cache, error) {
 	}
 
 	dbPath := filepath.Join(root, "index.db")
-	// Use sqlite3 driver (not modernc) for FTS5 support
-	// Add connection string parameters to ensure FTS5 is available
-	dsn := dbPath + "?_pragma=foreign_keys(1)"
-	db, err := gorm.Open(sqlite.Dialector{
-		DriverName: "sqlite3",
-		DSN:        dsn,
-	}, &gorm.Config{})
+	db, err := gorm.Open(sqlite.New(sqlite.Config{
+		DSN: dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous=NORMAL",
+	}), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -72,8 +72,8 @@ func (c *Cache) Root() string {
 }
 
 func (c *Cache) initSchema() error {
-	// GORM AutoMigrate handles all regular tables (Paper, Citation, SyncState, DownloadQueueItem)
-	if err := c.db.AutoMigrate(&Paper{}, &Citation{}, &SyncState{}, &DownloadQueueItem{}); err != nil {
+	// GORM AutoMigrate handles all regular tables (Paper, Citation, SyncState, DownloadQueueItem, Embedding)
+	if err := c.db.AutoMigrate(&Paper{}, &Citation{}, &SyncState{}, &DownloadQueueItem{}, &Embedding{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 
@@ -134,10 +134,40 @@ func (c *Cache) Stats(ctx context.Context) (*CacheStats, error) {
 	return stats, nil
 }
 
+// CountEmbeddings counts the total number of embeddings in the database.
+func (c *Cache) CountEmbeddings(ctx context.Context) (int64, error) {
+	var count int64
+	err := c.db.WithContext(ctx).Model(&Embedding{}).Count(&count).Error
+	return count, err
+}
+
 // CacheStats contains statistics about the cache.
 type CacheStats struct {
 	TotalPapers       int64
 	PDFsDownloaded    int64
 	SourcesDownloaded int64
 	QueuedDownloads   int64
+}
+
+// GenerateEmbeddingForPaper generates an embedding for a single paper.
+func (c *Cache) GenerateEmbeddingForPaper(ctx context.Context, paperID string) error {
+	// Check if embedding already exists
+	var existingCount int64
+	c.db.WithContext(ctx).Model(&Embedding{}).Where("paper_id = ?", paperID).Count(&existingCount)
+	if existingCount > 0 {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "python3", "/home/ubuntu/arxiv/tools/generate_embeddings.py", "--cache", c.root, "--paper-id", paperID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to generate embedding: %v, output: %s", err, string(output))
+	}
+
+	outputStr := strings.TrimSpace(string(output))
+	if strings.HasPrefix(outputStr, "ERROR:") {
+		return fmt.Errorf("embedding script error: %s", outputStr)
+	}
+
+	return nil
 }

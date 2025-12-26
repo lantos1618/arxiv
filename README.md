@@ -2,6 +2,11 @@
 
 arxiv is an offline arXiv paper cache manager.
 
+## Requirements
+
+- Go 1.20 or higher
+- Python 3 (for semantic search embeddings)
+
 It provides tools to fetch, cache, search, and browse arXiv papers locally, including TeX source files, PDFs, and extracted citation graphs.
 ## Usage
 
@@ -31,6 +36,10 @@ Fetch downloads paper metadata, TeX source, and optionally PDF:
 	arxiv fetch -all 2301.00001         # Fetch paper + source + PDF
 	arxiv fetch 2301.00001 2302.12345   # Fetch multiple papers
 
+To enable semantic search immediately when fetching:
+
+	arxiv fetch --with-embedding 2301.00001  # Fetch + generate embedding
+
 The fetch command also extracts citation references from TeX source files and stores them in the local database for graph visualization.
 
 ## Listing Papers
@@ -51,6 +60,32 @@ Full-text search across titles and abstracts:
 	arxiv search -category cs.CL "language model"
 	arxiv search -limit 50 "neural network"
 
+### Semantic Search
+
+Search papers by semantic similarity (requires embeddings):
+
+```bash
+# Option 1: Generate embeddings for all papers in cache
+arxiv reindex --embeddings
+
+# Option 2: Generate embeddings with limit (faster)
+arxiv reindex --embeddings --limit 1000
+
+# Option 3: Auto-generate when fetching new papers
+arxiv fetch --with-embedding 2301.00001
+
+# Option 4: Use Python script directly
+pip3 install -r tools/requirements.txt
+python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000
+
+# Start server and use semantic search in web UI
+arxiv serve
+```
+
+Semantic search finds papers by concept, not just keywords. For example, searching "attention mechanisms" will return papers about attention even if they don't use those exact words.
+
+**Note:** Embeddings are stored as ~1.5KB per paper. For 10,000 papers, this requires ~15MB storage.
+
 ## Web Interface
 
 Start a local web server to browse papers with a citation graph visualization:
@@ -61,6 +96,7 @@ Start a local web server to browse papers with a citation graph visualization:
 The web interface provides:
 
   - Full-text search with real-time results
+  - Semantic search by concept (requires embeddings)
   - Paper detail pages with abstracts and metadata
   - Interactive D3.js citation graph visualization
   - Category and author browsing
@@ -76,8 +112,11 @@ A complete REST API is available at `/api/v1/` for programmatic access:
 # Get paper metadata
 curl http://localhost:8080/api/v1/papers/2301.00001
 
-# Search papers
+# Search papers (keyword)
 curl "http://localhost:8080/api/v1/search?q=transformer&limit=10"
+
+# Search papers (semantic, requires embeddings)
+curl "http://localhost:8080/api/v1/search/semantic?q=attention mechanism&limit=10"
 
 # Export as BibTeX
 curl http://localhost:8080/api/v1/papers/2301.00001/export/bibtex
@@ -126,13 +165,20 @@ The cache is stored in ARXIV\_CACHE (default ~/.cache/arxiv):
 
 ## Examples
 
-	# Fetch a paper and view it in the web UI
+	# Fetch a paper and view it in web UI
 	arxiv fetch 2301.00001
 	arxiv serve
 
 	# Search for papers and fetch interesting ones
 	arxiv search "attention mechanism"
 	arxiv fetch 1706.03762
+
+	# Enable semantic search (batch)
+	arxiv reindex --embeddings --limit 1000
+	arxiv serve  # Then use semantic search in web UI
+
+	# Enable semantic search (fetch with embedding)
+	arxiv fetch --with-embedding 2301.00001 2301.00002
 
 	# List all AI papers with source code
 	arxiv ls -src cs.AI

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"time"
@@ -67,6 +68,7 @@ func cmdFetch(ctx context.Context, cacheDir string, args []string) {
 	pdf := fs.Bool("pdf", false, "Download PDF")
 	source := fs.Bool("source", true, "Download TeX source (default)")
 	all := fs.Bool("all", false, "Download both PDF and source")
+	withEmbedding := fs.Bool("with-embedding", false, "Generate embedding for semantic search (requires Python dependencies)")
 	fs.Parse(args)
 
 	if fs.NArg() == 0 {
@@ -80,8 +82,9 @@ func cmdFetch(ctx context.Context, cacheDir string, args []string) {
 	defer cache.Close()
 
 	opts := &arxiv.DownloadOptions{
-		DownloadPDF:    *pdf || *all,
-		DownloadSource: *source || *all,
+		DownloadPDF:       *pdf || *all,
+		DownloadSource:    *source || *all,
+		GenerateEmbedding: *withEmbedding,
 	}
 
 	for _, id := range fs.Args() {
@@ -100,6 +103,9 @@ func cmdFetch(ctx context.Context, cacheDir string, args []string) {
 		}
 		if paper.PDFPath != "" {
 			fmt.Printf("  PDF: %s\n", paper.PDFPath)
+		}
+		if opts.GenerateEmbedding {
+			fmt.Printf("  Embedding: Generating in background...\n")
 		}
 		fmt.Println()
 
@@ -295,6 +301,11 @@ func cmdList(ctx context.Context, cacheDir string, args []string) {
 }
 
 func cmdReindex(ctx context.Context, cacheDir string, args []string) {
+	fs := flag.NewFlagSet("reindex", flag.ExitOnError)
+	embeddings := fs.Bool("embeddings", false, "Generate embeddings for semantic search (requires Python dependencies)")
+	limit := fs.Int("limit", 0, "Limit number of papers to generate embeddings for (0 = all)")
+	fs.Parse(args)
+
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
 		log.Fatalf("open cache: %v", err)
@@ -310,5 +321,23 @@ func cmdReindex(ctx context.Context, cacheDir string, args []string) {
 	if err := cache.RebuildAllCitations(ctx); err != nil {
 		log.Fatalf("reindex citations: %v", err)
 	}
+
+	if *embeddings {
+		fmt.Println("Generating embeddings...")
+		// Use the Python script for batch embedding generation
+		// It's already optimized and handles batching
+		args := []string{"tools/generate_embeddings.py", cacheDir}
+		if *limit > 0 {
+			args = append(args, "--limit", fmt.Sprintf("%d", *limit))
+		}
+
+		cmd := exec.Command("python3", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Fatalf("generate embeddings: %v", err)
+		}
+	}
+
 	fmt.Println("Done.")
 }

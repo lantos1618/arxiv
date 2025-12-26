@@ -1,11 +1,114 @@
 {{define "search"}}
 {{template "head" .}}
+<style>
+	.action-buttons { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
+</style>
 <h1>Search Results</h1>
 <form class="search-form" action="/search" method="get">
 	<input type="text" name="q" placeholder="Search papers..." value="{{.Query}}">
 	<button type="submit">Search</button>
 </form>
-<p>{{len .Papers}} results for "{{.Query}}"</p>
+<div class="search-mode-toggle">
+	<label class="toggle-label">
+		<input type="radio" name="search-mode" value="keyword" {{if not .IsSemantic}}checked{{end}} id="mode-keyword">
+		<span class="toggle-text">Keyword</span>
+	</label>
+	<label class="toggle-label">
+		<input type="radio" name="search-mode" value="semantic" {{if .IsSemantic}}checked{{end}} id="mode-semantic">
+		<span class="toggle-text">Semantic</span>
+	</label>
+</div>
+{{if .IsSemantic}}
+<p>{{len .SemanticResults}} semantic results for "{{.Query}}"</p>
+{{range .SemanticResults}}
+<div class="paper">
+	<span class="paper-id">{{.PaperID}}</span>
+	{{if .Paper.SourceDownloaded}}<span class="badge badge-src">src</span>{{end}}
+	{{if .Paper.PDFDownloaded}}<span class="badge badge-pdf">pdf</span>{{end}}
+	<span class="badge badge-similarity">{{printf "%.0f" (.Similarity | mul 100)}}% match</span>
+	<div class="paper-title"><a href="/paper/{{.PaperID}}">{{.Paper.Title}}</a></div>
+	<div class="paper-authors">{{.Paper.Authors}}</div>
+	<div class="paper-categories">{{range $i, $c := parseCategories .Paper.Categories}}{{if $i}} {{end}}<a class="cat-link" href="/category/{{$c}}">{{$c}}</a>{{end}}</div>
+</div>
+{{else}}
+{{if .NoEmbeddings}}
+<div class="alert alert-warning">
+	<h3>Semantic Search Not Available</h3>
+	<p>Semantic search requires embeddings to be generated first. Embeddings are vector representations of papers that allow searching by concept rather than just keywords.</p>
+	<p><strong>What are embeddings?</strong> Embeddings convert paper titles and abstracts into 384-dimensional vectors, enabling the system to find papers that are semantically similar even if they don't use the same words.</p>
+
+	<div class="embedding-actions">
+		<h4>Generate Embeddings</h4>
+		<p>You have two options:</p>
+
+		<div class="action-buttons">
+			<button class="btn btn-secondary" id="generate-embeddings-btn">Generate All Embeddings</button>
+			<span id="embeddings-status" class="loading" style="display:none;">Generating embeddings...</span>
+		</div>
+
+		<p style="margin-top: 1rem;"><strong>Or use CLI commands:</strong></p>
+		<pre class="code-block"><code># Option 1: Generate embeddings for all papers in cache
+arxiv reindex --embeddings
+
+# Option 2: Generate embeddings with limit (faster)
+arxiv reindex --embeddings --limit 1000
+
+# Option 3: Auto-generate when fetching new papers
+arxiv fetch --with-embedding 2301.00001
+
+# Option 4: Use Python script directly
+python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000</code></pre>
+		<p>Note: Requires Python 3 and dependencies from <code>tools/requirements.txt</code>.</p>
+		<p>After generating embeddings, semantic search will work automatically.</p>
+	</div>
+</div>
+<script>
+(function() {
+	const btn = document.getElementById('generate-embeddings-btn');
+	const status = document.getElementById('embeddings-status');
+	if (!btn) return;
+
+	btn.addEventListener('click', async function() {
+		if (status.dataset.generating) return;
+
+		status.style.display = 'inline';
+		status.dataset.generating = 'true';
+		status.textContent = 'Generating embeddings...';
+		status.style.color = '';
+		btn.disabled = true;
+
+		try {
+			const response = await fetch('/api/v1/embeddings/generate', {
+				method: 'POST'
+			});
+
+			if (!response.ok) {
+				const error = await response.text();
+				throw new Error(error || 'Failed to generate embeddings');
+			}
+
+			const data = await response.json();
+			status.textContent = `Generated ${data.count || 0} embeddings!`;
+			setTimeout(() => {
+				window.location.reload();
+			}, 1500);
+		} catch (err) {
+			console.error('Embedding generation failed:', err);
+			status.textContent = 'Error: ' + err.message;
+			status.style.color = '#dc2626';
+			btn.disabled = false;
+			delete status.dataset.generating;
+		}
+	});
+})();
+</script>
+{{else}}
+<p>No semantic results found.</p>
+{{end}}
+{{end}}
+{{end}}
+{{else}}
+<p>{{len .Papers}} keyword results for "{{.Query}}"</p>
 {{range .Papers}}
 <div class="paper">
 	<span class="paper-id">{{.ID}}</span>
@@ -17,6 +120,7 @@
 </div>
 {{else}}
 <p>No results found.</p>
+{{end}}
 {{end}}
 {{template "foot" .}}
 {{end}}

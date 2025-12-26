@@ -118,12 +118,43 @@ curl http://localhost:8080/api/v1/papers/2301.00001/export/bibtex
 GET /api/v1/search?q={query}&category={category}&limit={limit}
 ```
 
-Searches papers by title and abstract.
+Searches papers by title and abstract using SQLite FTS5.
 
 **Query Parameters:**
 - `q` (required): Search query
 - `category` (optional): Filter by category (e.g., "cs.AI")
 - `limit` (optional): Maximum results (default: 20)
+
+#### Search PDF Content
+```
+GET /api/v1/search/pdf?q={query}&limit={limit}&fuzzy={boolean}
+```
+
+Searches within downloaded PDF content using fuzzy matching.
+
+**Query Parameters:**
+- `q` (required): Search query
+- `limit` (optional): Maximum results (default: 50)
+- `fuzzy` (optional): Enable fuzzy matching (default: false)
+
+#### Semantic Search
+```
+GET /api/v1/search/semantic?q={query}&limit={limit}
+```
+
+Searches papers using vector similarity. Requires embeddings to be generated first.
+
+**Note:** This feature requires running the embedding generation script:
+```bash
+# Install dependencies
+pip3 install -r tools/requirements.txt
+
+# Generate embeddings for all papers
+python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000
+
+# Or generate for all papers (takes longer)
+python3 tools/generate_embeddings.py ~/.cache/arxiv
+```
 
 **Example:**
 ```bash

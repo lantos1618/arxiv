@@ -27,6 +27,9 @@ type DownloadOptions struct {
 	// DownloadSource enables TeX source downloads
 	DownloadSource bool
 
+	// GenerateEmbedding generates embeddings in background after download
+	GenerateEmbedding bool
+
 	// Progress callback
 	Progress func(paperID string, downloaded, total int)
 }
@@ -54,7 +57,7 @@ func (c *Cache) DownloadPaper(ctx context.Context, paperID string, opts *Downloa
 		paper.PDFPath = pdfPath
 		paper.PDFDownloaded = true
 		c.paperLRU.Put(paperID, paper)
-		
+
 		// Extract PDF text in background for search
 		go func() {
 			bgCtx := context.Background()

@@ -162,8 +162,21 @@ func (c *Cache) FetchAndDownload(ctx context.Context, id string, opts *DownloadO
 		return paper, fmt.Errorf("download: %w", err)
 	}
 
-	// Refresh to get updated paths
-	return c.GetPaper(ctx, id)
+	paper, err = c.GetPaper(ctx, id)
+	if err != nil {
+		return paper, err
+	}
+
+	if opts.GenerateEmbedding {
+		go func() {
+			bgCtx := context.Background()
+			if err := c.GenerateEmbeddingForPaper(bgCtx, id); err != nil {
+				fmt.Printf("Warning: failed to generate embedding for %s: %v\n", id, err)
+			}
+		}()
+	}
+
+	return paper, nil
 }
 
 func fetchPaperMetadata(ctx context.Context, id string) (*Paper, error) {

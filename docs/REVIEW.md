@@ -1,13 +1,13 @@
 # Project Review: arXiv Cache Manager
 
 **Review Date:** December 25, 2025  
-**Overall Score:** 10/10
+**Overall Score:** 8/10
 
 ---
 
 ## Executive Summary
 
-The arXiv Cache Manager is an excellently-architected Go library for caching, searching, and browsing arXiv papers locally. The project demonstrates exceptional software engineering practices with clean code organization, comprehensive testing, and thorough documentation.
+The arXiv Cache Manager is a well-architected Go library for caching, searching, and browsing arXiv papers locally. The project demonstrates strong software engineering practices with clean code organization, good test coverage, and comprehensive documentation. **Note:** Semantic search is documented but not yet implemented (placeholder only).
 
 ---
 
@@ -37,7 +37,7 @@ arxiv/
 | Code Quality | 10/10 | Consistent style, proper error handling |
 | Testing | 9/10 | Good coverage (47%), all features tested |
 | Documentation | 10/10 | Clear README, API docs, contribution guide |
-| Features | 10/10 | Full-text, semantic, citation search + export |
+| Features | 8/10 | Full-text, citation search + export (semantic search planned) |
 | Maintainability | 10/10 | Makefile, clear file organization |
 
 ---

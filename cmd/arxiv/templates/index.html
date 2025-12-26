@@ -5,6 +5,16 @@
 	<input type="text" name="q" id="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off">
 	<button type="submit">Search</button>
 </form>
+<div class="search-mode-toggle">
+	<label class="toggle-label">
+		<input type="radio" name="search-mode" value="keyword" checked id="mode-keyword">
+		<span class="toggle-text">Keyword</span>
+	</label>
+	<label class="toggle-label">
+		<input type="radio" name="search-mode" value="semantic" id="mode-semantic">
+		<span class="toggle-text">Semantic</span>
+	</label>
+</div>
 <div id="search-results" class="search-results"></div>
 <p>{{.Stats.TotalPapers}} papers cached ({{.Stats.SourcesDownloaded}} with source, {{.Stats.PDFsDownloaded}} with PDF)</p>
 <div id="recent-papers">
@@ -29,14 +39,15 @@
 	const recent = document.getElementById('recent-papers');
 	let timeout = null;
 
-	function renderPaper(p) {
+	function renderPaper(p, similarity = null) {
 		const cats = (p.categories || '').split(' ').filter(c => c).map(c =>
 			'<a class="cat-link" href="/category/' + c + '">' + c + '</a>'
 		).join(' ');
 		const badges = (p.src ? '<span class="badge badge-src">src</span>' : '') +
 		               (p.pdf ? '<span class="badge badge-pdf">pdf</span>' : '');
+		const similarityBadge = similarity !== null ? '<span class="badge badge-similarity">' + Math.round(similarity * 100) + '% match</span>' : '';
 		return '<div class="paper">' +
-			'<span class="paper-id">' + p.id + '</span> ' + badges +
+			'<span class="paper-id">' + p.id + '</span> ' + badges + ' ' + similarityBadge +
 			'<div class="paper-title"><a href="/paper/' + p.id + '">' + escapeHtml(p.title) + '</a></div>' +
 			'<div class="paper-authors">' + escapeHtml(p.authors) + '</div>' +
 			'<div class="paper-categories">' + cats + '</div>' +
@@ -86,21 +97,57 @@
 			return;
 		}
 
-		results.innerHTML = '<p class="search-status">Searching...</p>';
+		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
+		const isSemantic = searchMode === 'semantic';
+		
+		results.innerHTML = '<p class="search-status">' + (isSemantic ? 'Semantic searching...' : 'Searching...') + '</p>';
 		recent.style.display = 'none';
 
-		fetch('/search?format=json&q=' + encodeURIComponent(query))
+		const endpoint = isSemantic ? '/api/v1/search/semantic' : '/search';
+		const params = new URLSearchParams({ q: query });
+		if (isSemantic) {
+			params.append('limit', '20');
+		} else {
+			params.append('format', 'json');
+		}
+
+		fetch(endpoint + '?' + params.toString())
 			.then(r => r.json())
 			.then(data => {
-				if (!data || data.length === 0) {
+				if (!data.success && !data.length) {
+					const errorMsg = data.error || 'No results for "' + escapeHtml(query) + '"';
+					results.innerHTML = '<p class="search-status">' + errorMsg + '</p>';
+					return;
+				}
+
+				let papers, count;
+				if (isSemantic && data.success) {
+					// Semantic search response format
+					papers = data.data.results;
+					count = data.data.count;
+				} else {
+					// Keyword search response format (direct array)
+					papers = data;
+					count = data.length;
+				}
+
+				if (!papers || papers.length === 0) {
 					results.innerHTML = '<p class="search-status">No results for "' + escapeHtml(query) + '"</p>';
 					return;
 				}
-				results.innerHTML = '<p class="search-status">' + data.length + ' results for "' + escapeHtml(query) + '"</p>' +
-					data.map(renderPaper).join('');
+
+				const searchTypeLabel = isSemantic ? 'semantic' : 'keyword';
+				results.innerHTML = '<p class="search-status">' + count + ' ' + searchTypeLabel + ' results for "' + escapeHtml(query) + '"</p>' +
+					papers.map(p => {
+						// Handle different paper object structures
+						const paper = p.paper || p;
+						const similarity = isSemantic ? p.similarity : null;
+						return renderPaper(paper, similarity);
+					}).join('');
 			})
 			.catch(err => {
-				results.innerHTML = '<p class="search-status">Search error</p>';
+				const errorType = isSemantic ? 'Semantic search unavailable' : 'Search error';
+				results.innerHTML = '<p class="search-status">' + errorType + '</p>';
 			});
 	}
 
@@ -109,12 +156,19 @@
 		timeout = setTimeout(() => doSearch(input.value), 300);
 	});
 
-	// Also handle form submit for immediate redirect on arXiv IDs
+	// Also handle form submit for immediate redirect on arXiv IDs or semantic search
 	document.getElementById('search-form').addEventListener('submit', function(e) {
 		const arxivID = extractArxivID(input.value);
 		if (arxivID) {
 			e.preventDefault();
 			window.location.href = '/paper/' + arxivID;
+			return;
+		}
+		
+		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
+		if (searchMode === 'semantic') {
+			e.preventDefault();
+			doSearch(input.value);
 		}
 	});
 })();
