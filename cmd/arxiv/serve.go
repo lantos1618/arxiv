@@ -613,6 +613,8 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	// Note: Client handles prefetch via /prefetch-refs endpoint
 
+	hasEmbedding := s.cache.HasEmbedding(ctx, id)
+
 	data := map[string]any{
 		"Title":          paper.Title,
 		"Paper":          paper,
@@ -621,6 +623,7 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 		"UncachedCount":  uncachedCount,
 		"CitedByCount":   citedByCount,
 		"FetchingSource": fetchingSource,
+		"HasEmbedding":   hasEmbedding,
 	}
 	templates.ExecuteTemplate(w, "paper", data)
 }

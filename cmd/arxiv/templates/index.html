@@ -17,15 +17,7 @@
 </div>
 <div id="search-results" class="search-results"></div>
 <p>{{.Stats.TotalPapers}} papers cached ({{.Stats.SourcesDownloaded}} with source, {{.Stats.PDFsDownloaded}} with PDF)</p>
-<div id="embedding-progress" style="display: none; margin: 20px 0; padding: 15px; background: #f0f8ff; border-radius: 5px; border-left: 4px solid #007bff;">
-	<h3 style="margin: 0 0 10px 0;">Generating Embeddings</h3>
-	<div id="embedding-status">Starting...</div>
-	<div id="embedding-bar-container" style="width: 100%; height: 20px; background: #e9ecef; border-radius: 10px; overflow: hidden; margin: 10px 0;">
-		<div id="embedding-bar" style="height: 100%; background: #007bff; width: 0%; transition: width 0.3s ease;"></div>
-	</div>
-	<div id="embedding-message"></div>
-</div>
-<button id="generate-embeddings-btn" style="margin: 10px 0; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">Generate Embeddings</button>
+
 <div id="recent-papers">
 <h2>Recent Papers</h2>
 {{range .Papers}}
@@ -189,125 +181,7 @@
 		}
 	});
 
-	// Embedding generation functionality
-	const generateBtn = document.getElementById('generate-embeddings-btn');
-	const progressDiv = document.getElementById('embedding-progress');
-	const statusDiv = document.getElementById('embedding-status');
-	const messageDiv = document.getElementById('embedding-message');
-	const progressBar = document.getElementById('embedding-bar');
-
-	generateBtn.addEventListener('click', function() {
-		const limit = prompt('Enter limit (number of papers to process, leave empty for all):');
-		
-		generateBtn.style.display = 'none';
-		progressDiv.style.display = 'block';
-		statusDiv.textContent = 'Starting embedding generation...';
-		messageDiv.textContent = '';
-		progressBar.style.width = '0%';
-
-		const url = '/api/v1/generate/embeddings';
-		const params = limit ? '?limit=' + encodeURIComponent(limit) : '';
-		
-		fetch(url + params, {
-			method: 'POST',
-			headers: {
-				'Accept': 'text/event-stream',
-				'Cache-Control': 'no-cache'
-			}
-		})
-		.then(response => {
-			if (!response.ok) {
-				throw new Error('HTTP ' + response.status);
-			}
-			return response.body.getReader();
-		})
-		.then(reader => {
-			const decoder = new TextDecoder();
-			
-			function readStream() {
-				return reader.read().then(({done, value}) => {
-					if (done) {
-						statusDiv.textContent = 'Completed';
-						progressBar.style.width = '100%';
-						generateBtn.style.display = 'block';
-						return;
-					}
-					
-					const chunk = decoder.decode(value, {stream: true});
-					const lines = chunk.split('\n');
-					
-					for (const line of lines) {
-						if (line.startsWith('data: ')) {
-							try {
-								const data = JSON.parse(line.substring(6));
-								handleEmbeddingEvent(data);
-							} catch (e) {
-								// Ignore malformed JSON
-							}
-						}
-					}
-					
-					return readStream();
-				});
-			}
-			
-			return readStream();
-		})
-		.catch(err => {
-			statusDiv.textContent = 'Error: ' + err.message;
-			progressDiv.style.display = 'none';
-			generateBtn.style.display = 'block';
-		});
-	});
-
-	function handleEmbeddingEvent(data) {
-		switch (data.type) {
-			case 'start':
-				statusDiv.textContent = data.message || 'Starting...';
-				break;
-			case 'progress':
-				if (data.current !== undefined && data.total !== undefined) {
-					const percent = data.total > 0 ? (data.current / data.total * 100) : 0;
-					progressBar.style.width = percent + '%';
-					statusDiv.textContent = `Processed ${data.current}/${data.total} papers (${Math.round(percent)}%)`;
-				}
-				if (data.message) {
-					messageDiv.textContent = data.message;
-				}
-				break;
-			case 'status':
-				if (data.message) {
-					messageDiv.textContent = data.message;
-				}
-				break;
-			case 'complete':
-				statusDiv.textContent = data.message || 'Completed';
-				progressBar.style.width = '100%';
-				if (data.count !== undefined) {
-					messageDiv.textContent = `Total embeddings: ${data.count}`;
-				}
-				setTimeout(() => {
-					progressDiv.style.display = 'none';
-					generateBtn.style.display = 'block';
-				}, 3000);
-				break;
-			case 'error':
-				statusDiv.textContent = 'Error occurred';
-				messageDiv.textContent = data.error || 'Unknown error';
-				setTimeout(() => {
-					progressDiv.style.display = 'none';
-					generateBtn.style.display = 'block';
-				}, 5000);
-				break;
-			case 'close':
-				setTimeout(() => {
-					progressDiv.style.display = 'none';
-					generateBtn.style.display = 'block';
-				}, 1000);
-				break;
-		}
-	}
- })();
+})();
  </script>
 {{template "foot" .}}
 {{end}}

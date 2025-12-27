@@ -42,28 +42,32 @@
 		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #1e293b; max-width: 960px; margin: 0 auto; padding: 1rem; }
 		a { color: #1d4ed8; text-decoration: none; }
 		a:hover { text-decoration: underline; }
-		h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; view-transition-name: paper-hero; }
-		h2 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25rem; }
+		h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; view-transition-name: paper-hero; min-height: 2rem; }
+		h2 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25rem; min-height: 1.5rem; }
 
-		.nav { margin-bottom: 1.5rem; font-size: 0.875rem; }
+		.nav { margin-bottom: 1.5rem; font-size: 0.875rem; min-height: 1.5rem; }
 		.nav a { margin-right: 1rem; }
-		.meta { font-size: 0.875rem; color: #64748b; margin-bottom: 0.5rem; }
+		.meta { font-size: 0.875rem; color: #64748b; margin-bottom: 0.5rem; min-height: 1.5rem; }
 		.meta code { font-family: monospace; background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; }
 		.authors { margin-bottom: 0.5rem; }
-		.categories { margin-bottom: 1rem; }
+		.categories { margin-bottom: 1rem; min-height: 1.5rem; }
 		.cat-link { display: inline-block; font-family: monospace; font-size: 0.8rem; background: #f1f5f9; padding: 0.15rem 0.5rem; border-radius: 3px; margin-right: 0.25rem; margin-bottom: 0.25rem; }
-		.abstract { white-space: pre-wrap; color: #334155; margin-bottom: 1rem; }
-		.actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-		.btn { display: inline-block; padding: 0.4rem 0.75rem; font-size: 0.8rem; background: #1d4ed8; color: #fff; border-radius: 4px; border: none; cursor: pointer; }
-		.btn:hover { background: #1e40af; text-decoration: none; }
-		.btn-secondary { background: #64748b; }
-		.btn-secondary:hover { background: #475569; }
-		.auto-fetch { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: #334155; }
+		/* Abstract - contain layout for MathJax rendering */
+		.abstract { white-space: pre-wrap; color: #334155; margin-bottom: 1rem; contain: layout style; }
+		/* Actions bar - fixed min-height prevents CLS */
+		.actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; min-height: 2.5rem; }
+		.btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1rem; font-size: 0.85rem; font-weight: 500; background: #1d4ed8; color: #fff; border-radius: 6px; border: none; cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; text-decoration: none; height: 2.25rem; }
+		.btn:hover { background: #1e40af; text-decoration: none; transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+		.btn:active { transform: translateY(0); }
+		.btn-secondary { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+		.btn-secondary:hover { background: #e2e8f0; color: #334155; }
+		.btn-icon { font-style: normal; }
+		.auto-fetch { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #64748b; margin-left: 0.25rem; }
 		.links { font-size: 0.875rem; margin-bottom: 1rem; }
 		.links a { margin-right: 1rem; }
 
-		/* Citation graph */
-		.graph-container { position: relative; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; height: 500px; margin: 1rem 0; }
+		/* Citation graph - explicit height prevents CLS */
+		.graph-container { position: relative; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; height: 500px; margin: 1rem 0; contain: layout; }
 		.graph-controls { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.5rem; z-index: 10; }
 		.graph-btn { padding: 0.3rem 0.6rem; font-size: 0.75rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 4px; cursor: pointer; }
 		.graph-btn:hover { background: #f1f5f9; }
@@ -78,9 +82,9 @@
 		.graph-link.highlighted { stroke: #1d4ed8; stroke-opacity: 1; stroke-width: 2px; }
 		.fullscreen { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000; height: 100vh; border-radius: 0; }
 
-		/* References list */
-		.refs { list-style: none; padding: 0; }
-		.refs li { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f1f5f9; font-size: 0.875rem; border-radius: 4px; margin-bottom: 2px; cursor: pointer; transition: background 0.15s, transform 0.1s; }
+		/* References list - contain layout to prevent CLS on dynamic updates */
+		.refs { list-style: none; padding: 0; contain: layout style; min-height: 100px; }
+		.refs li { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f1f5f9; font-size: 0.875rem; border-radius: 4px; margin-bottom: 2px; cursor: pointer; transition: background 0.15s, transform 0.1s; min-height: 2.5rem; contain: layout style; }
 		.refs li:hover { background: #eff6ff; transform: translateX(2px); }
 		.refs li.transitioning { view-transition-name: paper-hero; }
 		.ref-id { font-family: monospace; color: #64748b; }
@@ -93,15 +97,76 @@
 		.badge-src { background: #dcfce7; color: #166534; }
 		.badge-ref { background: #dbeafe; color: #1e40af; }
 		.badge-citing { background: #fef3c7; color: #92400e; }
+		.badge-embed { background: #e0e7ff; color: #3730a3; }
 
 		/* Files list */
 		.files { list-style: none; padding: 0; }
 		.files li { font-family: monospace; font-size: 0.875rem; padding: 0.25rem 0; }
 
-		/* Loading */
-		.loading { font-size: 0.8rem; color: #64748b; }
+		/* Loading - fixed dimensions prevent CLS when showing/hiding */
+		.loading { font-size: 0.8rem; color: #64748b; display: inline-block; min-width: 100px; vertical-align: middle; }
 		.loading::before { content: ""; display: inline-block; width: 10px; height: 10px; border: 2px solid #e2e8f0; border-top-color: #1d4ed8; border-radius: 50%; margin-right: 0.4rem; animation: spin 1s linear infinite; vertical-align: middle; }
 		@keyframes spin { to { transform: rotate(360deg); } }
+		/* Status messages in action bar - use absolute positioning to prevent CLS */
+		.actions .loading { position: relative; }
+
+		/* Terminal styling */
+		.terminal { 
+			background: #0d1117; 
+			border: 1px solid #30363d; 
+			border-radius: 8px; 
+			margin: 1rem 0; 
+			overflow: hidden;
+			max-height: 0;
+			opacity: 0;
+			transition: max-height 0.3s ease, opacity 0.2s ease, margin 0.3s ease;
+		}
+		.terminal.active { 
+			max-height: 300px; 
+			opacity: 1;
+		}
+		.terminal-header {
+			background: #161b22;
+			padding: 0.5rem 1rem;
+			display: flex;
+			align-items: center;
+			gap: 0.5rem;
+			border-bottom: 1px solid #30363d;
+		}
+		.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+		.terminal-dot.red { background: #ff5f56; }
+		.terminal-dot.yellow { background: #ffbd2e; }
+		.terminal-dot.green { background: #27c93f; }
+		.terminal-title { 
+			color: #8b949e; 
+			font-size: 0.75rem; 
+			font-family: monospace;
+			margin-left: auto;
+		}
+		.terminal-body {
+			padding: 1rem;
+			font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+			font-size: 0.8rem;
+			line-height: 1.6;
+			color: #c9d1d9;
+			max-height: 200px;
+			overflow-y: auto;
+		}
+		.terminal-line { margin: 0.25rem 0; }
+		.terminal-line.prompt::before { content: "$ "; color: #7ee787; }
+		.terminal-line.output { color: #8b949e; }
+		.terminal-line.success { color: #7ee787; }
+		.terminal-line.error { color: #f85149; }
+		.terminal-line.info { color: #58a6ff; }
+		.terminal-cursor {
+			display: inline-block;
+			width: 8px;
+			height: 1em;
+			background: #c9d1d9;
+			animation: blink 1s step-end infinite;
+			vertical-align: text-bottom;
+		}
+		@keyframes blink { 50% { opacity: 0; } }
 	</style>
 </head>
 <body>
@@ -109,7 +174,7 @@
 
 <h1>{{.Paper.Title}}</h1>
 <div class="meta">
-	<code>{{.Paper.ID}}</code> · {{.Paper.Created.Format "2006-01-02"}} · Cited by {{.CitedByCount}}
+	<code>{{.Paper.ID}}</code> · {{.Paper.Created.Format "2006-01-02"}} · Cited by {{.CitedByCount}}{{if .HasEmbedding}} · <span class="badge badge-embed">🧠 embedded</span>{{end}}
 </div>
 <div class="authors">{{range $i, $a := parseAuthors .Paper.Authors}}{{if $i}}, {{end}}<a href="/author/{{$a}}">{{$a}}</a>{{end}}</div>
 <div class="categories">{{range $i, $c := parseCategories .Paper.Categories}}<a class="cat-link" href="/category/{{$c}}">{{$c}}</a>{{end}}</div>
@@ -117,9 +182,18 @@
 <div class="abstract">{{.Paper.Abstract}}</div>
 
 <div class="actions">
-	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}">View PDF</a>{{else}}<form id="fetch-pdf-form" style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary" type="submit">Fetch PDF</button></form> <label class="auto-fetch"><input type="checkbox" id="auto-fetch-toggle"> Auto-fetch PDF on open</label> <span id="fetch-status" class="loading" style="display:none;">Fetching PDF...</span>{{end}}
-	<form id="generate-embedding-form" style="display:inline" method="POST" action="/api/v1/papers/{{.Paper.ID}}/embeddings"><button class="btn btn-secondary" type="submit" id="generate-embedding-btn">Generate Embedding</button></form> <span id="embedding-status" class="loading" style="display:none;">Generating embedding...</span>
-	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer">Open on arxiv.org</a>
+	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}"><i class="btn-icon">📄</i> View PDF</a>{{else}}<form id="fetch-pdf-form" style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary" type="submit"><i class="btn-icon">📥</i> Fetch PDF</button></form> <label class="auto-fetch"><input type="checkbox" id="auto-fetch-toggle"> Auto-fetch</label> <span id="fetch-status" class="loading" style="display:none;">Fetching PDF...</span>{{end}}
+	<button class="btn btn-secondary" type="button" id="generate-embedding-btn"><i class="btn-icon">🧠</i> {{if .HasEmbedding}}Regenerate{{else}}Generate{{end}} Embedding</button>
+	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer"><i class="btn-icon">↗</i> arxiv.org</a>
+</div>
+<div class="terminal" id="embedding-terminal">
+	<div class="terminal-header">
+		<span class="terminal-dot red"></span>
+		<span class="terminal-dot yellow"></span>
+		<span class="terminal-dot green"></span>
+		<span class="terminal-title">embedding-generator</span>
+	</div>
+	<div class="terminal-body" id="terminal-output"></div>
 </div>
 {{if .FetchingSource}}<div class="loading" id="source-status">Fetching TeX source and extracting references...</div>{{end}}
 <div class="links">
@@ -569,52 +643,101 @@
 		});
 	}
 
-	// Handle embedding generation
-	const embeddingForm = document.getElementById('generate-embedding-form');
+	// Handle embedding generation with terminal UI
 	const embeddingBtn = document.getElementById('generate-embedding-btn');
-	const embeddingStatus = document.getElementById('embedding-status');
+	const terminal = document.getElementById('embedding-terminal');
+	const terminalOutput = document.getElementById('terminal-output');
+	let isGenerating = false;
+	const hasExistingEmbedding = {{if .HasEmbedding}}true{{else}}false{{end}};
 
-	if (embeddingForm && embeddingBtn) {
-		embeddingForm.addEventListener('submit', function(e) {
-			e.preventDefault();
-			
-			if (embeddingStatus.dataset.generating === 'true') return;
-			
-			embeddingBtn.disabled = true;
-			embeddingStatus.style.display = 'inline';
-			embeddingStatus.dataset.generating = 'true';
-			embeddingStatus.textContent = 'Generating embedding...';
+	function terminalWrite(text, className = '') {
+		const line = document.createElement('div');
+		line.className = 'terminal-line' + (className ? ' ' + className : '');
+		line.textContent = text;
+		terminalOutput.appendChild(line);
+		terminalOutput.scrollTop = terminalOutput.scrollHeight;
+	}
 
-			fetch(embeddingForm.action, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				}
-			})
-			.then(response => response.json())
-			.then(data => {
-				if (data.success) {
-					embeddingStatus.textContent = 'Embedding generated successfully!';
-					embeddingStatus.style.color = '#059669';
-					setTimeout(() => {
-						embeddingStatus.style.display = 'none';
-						embeddingBtn.disabled = false;
-						delete embeddingStatus.dataset.generating;
-					}, 3000);
+	function terminalWriteTyping(text, className = '', delay = 30) {
+		return new Promise(resolve => {
+			const line = document.createElement('div');
+			line.className = 'terminal-line' + (className ? ' ' + className : '');
+			terminalOutput.appendChild(line);
+			
+			let i = 0;
+			const cursor = document.createElement('span');
+			cursor.className = 'terminal-cursor';
+			line.appendChild(cursor);
+			
+			function type() {
+				if (i < text.length) {
+					line.insertBefore(document.createTextNode(text[i]), cursor);
+					i++;
+					terminalOutput.scrollTop = terminalOutput.scrollHeight;
+					setTimeout(type, delay);
 				} else {
-					throw new Error(data.error || 'Failed to generate embedding');
+					cursor.remove();
+					resolve();
 				}
-			})
-			.catch(err => {
-				embeddingStatus.textContent = 'Error: ' + err.message;
-				embeddingStatus.style.color = '#dc2626';
-				embeddingBtn.disabled = false;
-				delete embeddingStatus.dataset.generating;
-				setTimeout(() => {
-					embeddingStatus.style.display = 'none';
-				}, 5000);
-			});
+			}
+			type();
 		});
+	}
+
+	async function runEmbeddingGeneration() {
+		if (isGenerating) return;
+		isGenerating = true;
+		embeddingBtn.disabled = true;
+		
+		terminalOutput.innerHTML = '';
+		terminal.classList.add('active');
+		
+		const flag = hasExistingEmbedding ? '--force ' : '';
+		await terminalWriteTyping('python3 generate_embeddings.py ' + flag + '--paper-id ' + paperID, 'prompt', 15);
+		await new Promise(r => setTimeout(r, 200));
+		
+		if (hasExistingEmbedding) {
+			terminalWrite('Existing embedding found, regenerating...', 'info');
+			await new Promise(r => setTimeout(r, 150));
+		}
+		terminalWrite('Loading sentence-transformers model...', 'info');
+		
+		try {
+			const response = await fetch('/api/v1/papers/' + paperID + '/embeddings', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' }
+			});
+			
+			const data = await response.json();
+			
+			await new Promise(r => setTimeout(r, 300));
+			terminalWrite('Model: all-MiniLM-L6-v2 (384 dimensions)', 'output');
+			await new Promise(r => setTimeout(r, 200));
+			terminalWrite('Encoding: "' + (data.data?.paper?.Title || paperID).substring(0, 50) + '..."', 'output');
+			await new Promise(r => setTimeout(r, 400));
+			
+			if (data.success) {
+				terminalWrite('Embedding stored in database', 'output');
+				await new Promise(r => setTimeout(r, 150));
+				terminalWrite('✓ Done! Embedding generated for ' + paperID, 'success');
+				
+				setTimeout(() => {
+					terminal.classList.remove('active');
+					isGenerating = false;
+					embeddingBtn.disabled = false;
+				}, 3000);
+			} else {
+				throw new Error(data.error || 'Generation failed');
+			}
+		} catch (err) {
+			terminalWrite('✗ Error: ' + err.message, 'error');
+			isGenerating = false;
+			embeddingBtn.disabled = false;
+		}
+	}
+
+	if (embeddingBtn) {
+		embeddingBtn.addEventListener('click', runEmbeddingGeneration);
 	}
 
 	// Initial graph load

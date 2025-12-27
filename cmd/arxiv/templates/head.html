@@ -13,16 +13,17 @@
 	<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 	<style>
 		* { box-sizing: border-box; }
-		body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem; line-height: 1.5; }
+		body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem; line-height: 1.5; }
 		a { color: #0066cc; }
 		.search-form { margin: 1rem 0; }
 		.search-form input[type="text"] { padding: 0.5rem; width: 300px; font-size: 1rem; }
 		.search-form button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
-		.paper { border-bottom: 1px solid #eee; padding: 1rem 0; }
+		/* Paper cards - fixed min-height prevents CLS when badges load */
+		.paper { border-bottom: 1px solid #eee; padding: 1rem 0; min-height: 5.5rem; contain: layout style; }
 		.paper-id { font-family: monospace; color: #666; }
-		.paper-title { font-size: 1.1rem; font-weight: 600; margin: 0.25rem 0; }
-		.paper-authors { color: #444; }
-		.paper-categories { font-size: 0.9rem; color: #666; }
+		.paper-title { font-size: 1.1rem; font-weight: 600; margin: 0.25rem 0; min-height: 1.4rem; }
+		.paper-authors { color: #444; min-height: 1.5rem; }
+		.paper-categories { font-size: 0.9rem; color: #666; min-height: 1.2rem; }
 		.paper-abstract { margin: 1rem 0; white-space: pre-wrap; }
 		.paper-meta { font-size: 0.9rem; color: #666; margin: 0.5rem 0; }
 		.badge { display: inline-block; background: #e0e0e0; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.8rem; margin-right: 0.25rem; }
@@ -96,11 +97,14 @@
 		.cat-item { background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 4px; }
 		.cat-item a { text-decoration: none; font-family: monospace; }
 		.cat-count { color: #666; font-size: 0.9em; }
-		.search-results { margin-top: 1rem; }
-		.search-status { color: #666; font-size: 0.9em; margin: 0.5rem 0; }
+		/* Search results - reserve space to prevent CLS when results load */
+		.search-results { margin-top: 1rem; min-height: 0; contain: layout style; }
+		.search-results:not(:empty) { min-height: 200px; }
+		.search-status { color: #666; font-size: 0.9em; margin: 0.5rem 0; min-height: 1.5rem; }
 		.graph-section { margin: 2rem 0; }
-		.graph-container { border: 1px solid #ddd; border-radius: 4px; background: #fafafa; position: relative; }
-		.graph-container svg { display: block; }
+		/* Graph container - explicit dimensions prevent CLS */
+		.graph-container { border: 1px solid #ddd; border-radius: 4px; background: #fafafa; position: relative; aspect-ratio: 16/9; min-height: 300px; contain: layout; }
+		.graph-container svg { display: block; width: 100%; height: 100%; }
 		.graph-controls { position: absolute; top: 0.5rem; right: 0.5rem; z-index: 10; }
 		.graph-legend { position: absolute; bottom: 0.5rem; left: 0.5rem; background: rgba(255,255,255,0.9); padding: 0.5rem; border-radius: 4px; font-size: 11px; }
 		.legend-item { display: flex; align-items: center; margin: 0.15rem 0; }
@@ -115,7 +119,8 @@
 		.pulse-node { animation: pulse 0.6s ease-in-out; }
 		.graph-fullscreen { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000; background: white; }
 		.graph-fullscreen .graph-container { width: 100%; height: 100%; border: none; border-radius: 0; }
-		.prefetch-status { font-size: 0.8em; color: #666; font-weight: normal; margin-left: 0.5rem; }
+		/* Loading status - use inline-block with fixed width to prevent CLS */
+		.prefetch-status { font-size: 0.8em; color: #666; font-weight: normal; margin-left: 0.5rem; display: inline-block; min-width: 120px; }
 		.prefetch-status::before { content: ""; display: inline-block; width: 12px; height: 12px; border: 2px solid #ddd; border-top-color: #0066cc; border-radius: 50%; margin-right: 0.4rem; animation: spin 1s linear infinite; vertical-align: middle; }
 		@keyframes spin { to { transform: rotate(360deg); } }
 		.prefetch-done { color: #28a745; }

@@ -150,6 +150,13 @@ func (c *Cache) CountEmbeddings(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+// HasEmbedding checks if a paper has an embedding.
+func (c *Cache) HasEmbedding(ctx context.Context, paperID string) bool {
+	var count int64
+	c.db.WithContext(ctx).Model(&Embedding{}).Where("paper_id = ?", paperID).Count(&count)
+	return count > 0
+}
+
 // CacheStats contains statistics about the cache.
 type CacheStats struct {
 	TotalPapers       int64
