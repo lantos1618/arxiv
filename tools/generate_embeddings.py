@@ -34,13 +34,15 @@ def deserialize_embedding(data):
 
 
 def generate_single_embedding(query, model_name=MODEL_NAME):
-    """Generate embedding for a single query string."""
     import numpy as np
-    print(f"Loading model: {model_name}")
-    model = SentenceTransformer(model_name)
-    print(f"Model loaded. Embedding dimension: {model.get_sentence_embedding_dimension()}")
-    
-    # Generate embedding for the query
+    import sys
+    import os
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    with open(os.devnull, 'w') as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        model = SentenceTransformer(model_name)
+        sys.stderr = old_stderr
     embedding = model.encode([query], convert_to_numpy=True)[0]
     print(','.join(map(str, embedding.astype(np.float32))))
 
@@ -107,11 +109,13 @@ def generate_embeddings(cache_dir, model_name=MODEL_NAME, limit=None, batch_size
         print("No papers need embeddings.")
         return
     
-    print(f"Found {len(papers)} papers to process")
+    total_papers = len(papers)
+    print(f"Found {total_papers} papers to process")
+    sys.stdout.flush()
     
     # Process in batches
     processed = 0
-    for i in tqdm(range(0, len(papers), batch_size), desc="Processing batches"):
+    for i in range(0, total_papers, batch_size):
         batch = papers[i:i+batch_size]
         
         # Prepare texts (title + abstract)
@@ -135,13 +139,73 @@ def generate_embeddings(cache_dir, model_name=MODEL_NAME, limit=None, batch_size
             """, (paper_id, model_name, vector_bytes))
         
         processed += len(batch)
+        
+        # Output progress in format expected by SSE handler
+        percent = (processed / total_papers) * 100
+        print(f"Processed {processed}/{total_papers} papers ({percent:.1f}% complete)")
+        sys.stdout.flush()
+        
         if processed % 100 == 0:
             conn.commit()
     
     conn.commit()
     conn.close()
     
-    print(f"\nDone! Generated embeddings for {processed} papers.")
+    print(f"Done! Generated embeddings for {processed} papers.")
+
+
+def generate_paper_embedding(cache_dir, paper_id, model_name=MODEL_NAME):
+    """Generate embedding for a single paper by ID."""
+    cache_path = Path(cache_dir)
+    db_path = cache_path / "index.db"
+    
+    if not db_path.exists():
+        print(f"ERROR: Database not found at {db_path}")
+        sys.exit(1)
+    
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id, title, abstract FROM papers WHERE id = ?", (paper_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        print(f"ERROR: Paper {paper_id} not found")
+        conn.close()
+        sys.exit(1)
+    
+    paper_id, title, abstract = row
+    
+    if not title and not abstract:
+        print(f"ERROR: Paper {paper_id} has no title or abstract")
+        conn.close()
+        sys.exit(1)
+    
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'")
+    if not cursor.fetchone():
+        cursor.execute("""
+            CREATE TABLE embeddings (
+                paper_id TEXT PRIMARY KEY,
+                model TEXT,
+                vector BLOB,
+                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    
+    model = SentenceTransformer(model_name)
+    text = f"{title}. {abstract}" if title and abstract else (title or abstract)
+    embedding = model.encode([text], convert_to_numpy=True)[0]
+    vector_bytes = serialize_embedding(embedding)
+    
+    cursor.execute("""
+        INSERT OR REPLACE INTO embeddings (paper_id, model, vector, created)
+        VALUES (?, ?, ?, datetime('now'))
+    """, (paper_id, model_name, vector_bytes))
+    
+    conn.commit()
+    conn.close()
+    print(f"OK: Generated embedding for {paper_id}")
 
 
 def main():
@@ -153,15 +217,24 @@ def main():
                        help="Limit number of papers to process")
     parser.add_argument("--batch-size", type=int, default=32,
                        help="Batch size for embedding generation (default: 32)")
+    parser.add_argument("--query", type=str, default=None,
+                       help="Generate embedding for a query string (prints comma-separated floats)")
+    parser.add_argument("--paper-id", type=str, default=None,
+                       help="Generate embedding for a single paper by ID")
     
     args = parser.parse_args()
     
-    generate_embeddings(
-        args.cache_dir,
-        model_name=args.model,
-        limit=args.limit,
-        batch_size=args.batch_size
-    )
+    if args.query:
+        generate_single_embedding(args.query, args.model)
+    elif args.paper_id:
+        generate_paper_embedding(args.cache_dir, args.paper_id, args.model)
+    else:
+        generate_embeddings(
+            args.cache_dir,
+            model_name=args.model,
+            limit=args.limit,
+            batch_size=args.batch_size
+        )
 
 
 if __name__ == "__main__":

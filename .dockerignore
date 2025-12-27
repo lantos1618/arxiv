@@ -1,12 +1,9 @@
 # Cache data
 data/
 
-# Python files not needed for build
-get-pip.py
-tools/generate_embeddings.py
-tools/query_embedding.py
-tools/requirements.txt
+# Python cache
 tools/__pycache__/
+get-pip.py
 
 # Git files
 .git/

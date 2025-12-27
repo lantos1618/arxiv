@@ -5,7 +5,7 @@
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<meta name="view-transition" content="same-origin">
-	<title>{{.Paper.Title}} - arXiv Cache</title>
+	<title>{{.Paper.Title}} - arXiv.gg</title>
 	<script>
 	MathJax = {
 		tex: {inlineMath: [['$', '$'], ['\\(', '\\)']]}
@@ -118,6 +118,7 @@
 
 <div class="actions">
 	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}">View PDF</a>{{else}}<form id="fetch-pdf-form" style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary" type="submit">Fetch PDF</button></form> <label class="auto-fetch"><input type="checkbox" id="auto-fetch-toggle"> Auto-fetch PDF on open</label> <span id="fetch-status" class="loading" style="display:none;">Fetching PDF...</span>{{end}}
+	<form id="generate-embedding-form" style="display:inline" method="POST" action="/api/v1/papers/{{.Paper.ID}}/embeddings"><button class="btn btn-secondary" type="submit" id="generate-embedding-btn">Generate Embedding</button></form> <span id="embedding-status" class="loading" style="display:none;">Generating embedding...</span>
 	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer">Open on arxiv.org</a>
 </div>
 {{if .FetchingSource}}<div class="loading" id="source-status">Fetching TeX source and extracting references...</div>{{end}}
@@ -568,10 +569,58 @@
 		});
 	}
 
+	// Handle embedding generation
+	const embeddingForm = document.getElementById('generate-embedding-form');
+	const embeddingBtn = document.getElementById('generate-embedding-btn');
+	const embeddingStatus = document.getElementById('embedding-status');
+
+	if (embeddingForm && embeddingBtn) {
+		embeddingForm.addEventListener('submit', function(e) {
+			e.preventDefault();
+			
+			if (embeddingStatus.dataset.generating === 'true') return;
+			
+			embeddingBtn.disabled = true;
+			embeddingStatus.style.display = 'inline';
+			embeddingStatus.dataset.generating = 'true';
+			embeddingStatus.textContent = 'Generating embedding...';
+
+			fetch(embeddingForm.action, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				}
+			})
+			.then(response => response.json())
+			.then(data => {
+				if (data.success) {
+					embeddingStatus.textContent = 'Embedding generated successfully!';
+					embeddingStatus.style.color = '#059669';
+					setTimeout(() => {
+						embeddingStatus.style.display = 'none';
+						embeddingBtn.disabled = false;
+						delete embeddingStatus.dataset.generating;
+					}, 3000);
+				} else {
+					throw new Error(data.error || 'Failed to generate embedding');
+				}
+			})
+			.catch(err => {
+				embeddingStatus.textContent = 'Error: ' + err.message;
+				embeddingStatus.style.color = '#dc2626';
+				embeddingBtn.disabled = false;
+				delete embeddingStatus.dataset.generating;
+				setTimeout(() => {
+					embeddingStatus.style.display = 'none';
+				}, 5000);
+			});
+		});
+	}
+
 	// Initial graph load
 	refreshGraph();
 
-	// Prefetch reference titles and update the list
+	// Prefetch reference titles and update list
 	// Shows loading indicator, calls prefetch endpoint, then refreshes refs list
 	function prefetchAndRefresh() {
 		// Show loading indicator
@@ -589,7 +638,7 @@
 		return fetch('/paper/' + paperID + '/prefetch-refs', { method: 'POST' })
 			.then(r => r.json())
 			.then(() => {
-				// Prefetch done - refresh the refs list to show titles
+				// Prefetch done - refresh refs list to show titles
 				return refreshRefsList();
 			})
 			.then(() => {

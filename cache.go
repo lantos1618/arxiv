@@ -12,11 +12,23 @@ import (
 	"gorm.io/gorm"
 )
 
+func getEmbeddingScriptPath() string {
+	for _, path := range []string{
+		"/app/tools/generate_embeddings.py",
+		"tools/generate_embeddings.py",
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return "/app/tools/generate_embeddings.py"
+}
+
 // Cache manages a local offline cache of arXiv papers.
 type Cache struct {
 	root     string
 	db       *gorm.DB
-	paperLRU *LRUCache // In-memory cache for papers
+	paperLRU *LRUCache
 }
 
 // Open opens or creates an arXiv cache at the given root directory.
@@ -155,7 +167,7 @@ func (c *Cache) GenerateEmbeddingForPaper(ctx context.Context, paperID string) e
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "python3", "/home/ubuntu/arxiv/tools/generate_embeddings.py", "--cache", c.root, "--paper-id", paperID)
+	cmd := exec.CommandContext(ctx, "python3", getEmbeddingScriptPath(), c.root, "--paper-id", paperID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to generate embedding: %v, output: %s", err, string(output))
