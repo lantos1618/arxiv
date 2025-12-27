@@ -8,9 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
-	_ "modernc.org/sqlite"
 )
 
 // Cache manages a local offline cache of arXiv papers.
@@ -34,9 +33,7 @@ func Open(root string) (*Cache, error) {
 	}
 
 	dbPath := filepath.Join(root, "index.db")
-	db, err := gorm.Open(sqlite.New(sqlite.Config{
-		DSN: dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous=NORMAL",
-	}), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(dbPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous=NORMAL"), &gorm.Config{
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
