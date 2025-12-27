@@ -90,14 +90,19 @@
 		return null;
 	}
 
+	let activeEventSource = null;
+
 	function doSearch(query) {
 		if (!query.trim()) {
 			results.innerHTML = '';
 			recent.style.display = '';
+			if (activeEventSource) {
+				activeEventSource.close();
+				activeEventSource = null;
+			}
 			return;
 		}
 
-		// Check if it's an arXiv ID - redirect immediately
 		const arxivID = extractArxivID(query);
 		if (arxivID) {
 			results.innerHTML = '<p class="search-status">Loading paper ' + escapeHtml(arxivID) + '...</p>';
@@ -106,58 +111,67 @@
 			return;
 		}
 
+		if (activeEventSource) {
+			activeEventSource.close();
+			activeEventSource = null;
+		}
+
 		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
 		const isSemantic = searchMode === 'semantic';
 		
-		results.innerHTML = '<p class="search-status">' + (isSemantic ? 'Semantic searching...' : 'Searching...') + '</p>';
+		results.innerHTML = '<p class="search-status" id="search-status">' + (isSemantic ? 'Semantic searching...' : 'Searching...') + '</p><div id="paper-results"></div>';
 		recent.style.display = 'none';
 
-		const endpoint = isSemantic ? '/api/v1/search/semantic' : '/search';
-		const params = new URLSearchParams({ q: query });
-		if (isSemantic) {
-			params.append('limit', '20');
-		} else {
-			params.append('format', 'json');
-		}
+		const params = new URLSearchParams({ q: query, limit: '100' });
+		if (isSemantic) params.append('mode', 'semantic');
 
-		fetch(endpoint + '?' + params.toString())
-			.then(r => r.json())
-			.then(data => {
-				if (!data.success && !data.length) {
-					const errorMsg = data.error || 'No results for "' + escapeHtml(query) + '"';
-					results.innerHTML = '<p class="search-status">' + errorMsg + '</p>';
-					return;
-				}
+		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
+		const paperContainer = document.getElementById('paper-results');
+		const statusEl = document.getElementById('search-status');
+		let resultCount = 0;
 
-				let papers, count;
-				if (isSemantic && data.success) {
-					// Semantic search response format
-					papers = data.data.results;
-					count = data.data.count;
-				} else {
-					// Keyword search response format (direct array)
-					papers = data;
-					count = data.length;
-				}
+		activeEventSource.onmessage = function(e) {
+			const data = JSON.parse(e.data);
+			
+			switch (data.type) {
+				case 'start':
+					statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
+					break;
+				case 'status':
+					statusEl.textContent = data.message;
+					break;
+				case 'result':
+					resultCount++;
+					const paper = data.paper;
+					const similarity = data.similarity || null;
+					paperContainer.insertAdjacentHTML('beforeend', renderPaper(paper, similarity));
+					statusEl.textContent = resultCount + ' results found...';
+					break;
+				case 'complete':
+					const modeLabel = data.mode === 'semantic' ? 'semantic' : 'keyword';
+					statusEl.textContent = data.count + ' ' + modeLabel + ' results for "' + escapeHtml(query) + '"';
+					activeEventSource.close();
+					activeEventSource = null;
+					break;
+				case 'error':
+					statusEl.textContent = data.error;
+					statusEl.style.color = '#dc2626';
+					activeEventSource.close();
+					activeEventSource = null;
+					break;
+			}
+		};
 
-				if (!papers || papers.length === 0) {
-					results.innerHTML = '<p class="search-status">No results for "' + escapeHtml(query) + '"</p>';
-					return;
-				}
-
-				const searchTypeLabel = isSemantic ? 'semantic' : 'keyword';
-				results.innerHTML = '<p class="search-status">' + count + ' ' + searchTypeLabel + ' results for "' + escapeHtml(query) + '"</p>' +
-					papers.map(p => {
-						// Handle different paper object structures
-						const paper = p.paper || p;
-						const similarity = isSemantic ? p.similarity : null;
-						return renderPaper(paper, similarity);
-					}).join('');
-			})
-			.catch(err => {
-				const errorType = isSemantic ? 'Semantic search unavailable' : 'Search error';
-				results.innerHTML = '<p class="search-status">' + errorType + '</p>';
-			});
+		activeEventSource.onerror = function() {
+			if (resultCount === 0) {
+				statusEl.textContent = 'Search failed - please try again';
+				statusEl.style.color = '#dc2626';
+			}
+			if (activeEventSource) {
+				activeEventSource.close();
+				activeEventSource = null;
+			}
+		};
 	}
 
 	input.addEventListener('input', function() {

@@ -13,10 +13,10 @@ import (
 
 // cacheEntry holds cached response data
 type cacheEntry struct {
-	etag       string
-	lastMod    time.Time
-	data       []byte
-	expiresAt  time.Time
+	etag      string
+	lastMod   time.Time
+	data      []byte
+	expiresAt time.Time
 }
 
 // cacheMiddleware provides HTTP caching with ETag support
@@ -65,6 +65,12 @@ func (cm *cacheMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only cache GET requests
 		if r.Method != http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// SSE endpoints require http.Flusher - skip caching wrapper
+		if strings.Contains(r.URL.Path, "/stream") || strings.Contains(r.URL.Path, "/generate") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -183,6 +189,11 @@ func (rl *rateLimiter) cleanup() {
 // Handler wraps an http.Handler with rate limiting
 func (rl *rateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bypass rate limiting for SSE endpoints to support streaming
+		if strings.Contains(r.URL.Path, "/stream") || strings.Contains(r.URL.Path, "/generate") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ip := r.RemoteAddr
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 			parts := strings.Split(forwarded, ",")
@@ -239,4 +250,3 @@ func (rl *rateLimiter) Handler(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

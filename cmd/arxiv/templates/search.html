@@ -2,10 +2,13 @@
 {{template "head" .}}
 <style>
 	.action-buttons { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
+	#search-status { color: #4b5563; font-style: italic; }
+	#paper-results .paper { animation: fadeIn 0.2s ease-out; }
+	@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 </style>
 <h1>Search Results</h1>
-<form class="search-form" action="/search" method="get">
-	<input type="text" name="q" placeholder="Search papers..." value="{{.Query}}">
+<form class="search-form" action="/search" method="get" id="search-form">
+	<input type="text" name="q" id="search-input" placeholder="Search papers..." value="{{.Query}}">
 	<button type="submit">Search</button>
 </form>
 <div class="search-mode-toggle">
@@ -18,8 +21,23 @@
 		<span class="toggle-text">Semantic</span>
 	</label>
 </div>
+
+<p id="search-status"></p>
+<div id="paper-results">
 {{if .IsSemantic}}
-<p>{{len .SemanticResults}} semantic results for "{{.Query}}"</p>
+{{if .NoEmbeddings}}
+<div class="alert alert-warning">
+	<h3>Semantic Search Not Available</h3>
+	<p>Semantic search requires embeddings to be generated first.</p>
+	<div class="embedding-actions">
+		<div class="action-buttons">
+			<button class="btn btn-secondary" id="generate-embeddings-btn">Generate All Embeddings</button>
+			<span id="embeddings-status" class="loading" style="display:none;">Generating embeddings...</span>
+		</div>
+		<p style="margin-top: 1rem;"><strong>Or use CLI:</strong> <code>arxiv reindex --embeddings</code></p>
+	</div>
+</div>
+{{else}}
 {{range .SemanticResults}}
 <div class="paper">
 	<span class="paper-id">{{.PaperID}}</span>
@@ -31,83 +49,10 @@
 	<div class="paper-categories">{{range $i, $c := parseCategories .Paper.Categories}}{{if $i}} {{end}}<a class="cat-link" href="/category/{{$c}}">{{$c}}</a>{{end}}</div>
 </div>
 {{else}}
-{{if .NoEmbeddings}}
-<div class="alert alert-warning">
-	<h3>Semantic Search Not Available</h3>
-	<p>Semantic search requires embeddings to be generated first. Embeddings are vector representations of papers that allow searching by concept rather than just keywords.</p>
-	<p><strong>What are embeddings?</strong> Embeddings convert paper titles and abstracts into 384-dimensional vectors, enabling the system to find papers that are semantically similar even if they don't use the same words.</p>
-
-	<div class="embedding-actions">
-		<h4>Generate Embeddings</h4>
-		<p>You have two options:</p>
-
-		<div class="action-buttons">
-			<button class="btn btn-secondary" id="generate-embeddings-btn">Generate All Embeddings</button>
-			<span id="embeddings-status" class="loading" style="display:none;">Generating embeddings...</span>
-		</div>
-
-		<p style="margin-top: 1rem;"><strong>Or use CLI commands:</strong></p>
-		<pre class="code-block"><code># Option 1: Generate embeddings for all papers in cache
-arxiv reindex --embeddings
-
-# Option 2: Generate embeddings with limit (faster)
-arxiv reindex --embeddings --limit 1000
-
-# Option 3: Auto-generate when fetching new papers
-arxiv fetch --with-embedding 2301.00001
-
-# Option 4: Use Python script directly
-python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000</code></pre>
-		<p>Note: Requires Python 3 and dependencies from <code>tools/requirements.txt</code>.</p>
-		<p>After generating embeddings, semantic search will work automatically.</p>
-	</div>
-</div>
-<script>
-(function() {
-	const btn = document.getElementById('generate-embeddings-btn');
-	const status = document.getElementById('embeddings-status');
-	if (!btn) return;
-
-	btn.addEventListener('click', async function() {
-		if (status.dataset.generating) return;
-
-		status.style.display = 'inline';
-		status.dataset.generating = 'true';
-		status.textContent = 'Generating embeddings...';
-		status.style.color = '';
-		btn.disabled = true;
-
-		try {
-			const response = await fetch('/api/v1/embeddings/generate', {
-				method: 'POST'
-			});
-
-			if (!response.ok) {
-				const error = await response.text();
-				throw new Error(error || 'Failed to generate embeddings');
-			}
-
-			const data = await response.json();
-			status.textContent = `Generated ${data.count || 0} embeddings!`;
-			setTimeout(() => {
-				window.location.reload();
-			}, 1500);
-		} catch (err) {
-			console.error('Embedding generation failed:', err);
-			status.textContent = 'Error: ' + err.message;
-			status.style.color = '#dc2626';
-			btn.disabled = false;
-			delete status.dataset.generating;
-		}
-	});
-})();
-</script>
-{{else}}
 <p>No semantic results found.</p>
 {{end}}
 {{end}}
 {{else}}
-<p>{{len .Papers}} keyword results for "{{.Query}}"</p>
 {{range .Papers}}
 <div class="paper">
 	<span class="paper-id">{{.ID}}</span>
@@ -121,5 +66,157 @@ python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000</code></pre>
 <p>No results found.</p>
 {{end}}
 {{end}}
+</div>
+
+<script>
+(function() {
+	const form = document.getElementById('search-form');
+	const input = document.getElementById('search-input');
+	const statusEl = document.getElementById('search-status');
+	const paperContainer = document.getElementById('paper-results');
+	const modeInputs = document.querySelectorAll('input[name="search-mode"]');
+	let activeEventSource = null;
+	
+	const initialQuery = '{{.Query}}';
+	const initialMode = '{{if .IsSemantic}}semantic{{else}}keyword{{end}}';
+	const initialCount = {{if .IsSemantic}}{{len .SemanticResults}}{{else}}{{len .Papers}}{{end}};
+	
+	if (initialQuery && initialCount > 0) {
+		statusEl.textContent = initialCount + ' ' + initialMode + ' results for "' + initialQuery + '"';
+	}
+
+	function escapeHtml(s) {
+		const div = document.createElement('div');
+		div.textContent = s;
+		return div.innerHTML;
+	}
+
+	function renderPaper(p, similarity) {
+		const id = p.ID || p.id;
+		const title = p.Title || p.title || '';
+		const authors = p.Authors || p.authors || '';
+		const categories = p.Categories || p.categories || '';
+		const hasSource = p.SourceDownloaded || p.src;
+		const hasPdf = p.PDFDownloaded || p.pdf;
+		
+		const cats = categories.split(' ').filter(c => c).map(c =>
+			'<a class="cat-link" href="/category/' + c + '">' + c + '</a>'
+		).join(' ');
+		const badges = (hasSource ? '<span class="badge badge-src">src</span>' : '') +
+		               (hasPdf ? '<span class="badge badge-pdf">pdf</span>' : '');
+		const similarityBadge = similarity ? '<span class="badge badge-similarity">' + Math.round(similarity * 100) + '% match</span>' : '';
+		
+		return '<div class="paper">' +
+			'<span class="paper-id">' + id + '</span> ' + badges + ' ' + similarityBadge +
+			'<div class="paper-title"><a href="/paper/' + id + '">' + escapeHtml(title) + '</a></div>' +
+			'<div class="paper-authors">' + escapeHtml(authors) + '</div>' +
+			'<div class="paper-categories">' + cats + '</div>' +
+		'</div>';
+	}
+
+	function doStreamSearch(query, mode) {
+		if (activeEventSource) {
+			activeEventSource.close();
+			activeEventSource = null;
+		}
+
+		const isSemantic = mode === 'semantic';
+		paperContainer.innerHTML = '';
+		statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
+		statusEl.style.color = '';
+
+		const params = new URLSearchParams({ q: query, limit: '100' });
+		if (isSemantic) params.append('mode', 'semantic');
+
+		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
+		let resultCount = 0;
+
+		activeEventSource.onmessage = function(e) {
+			const data = JSON.parse(e.data);
+			
+			switch (data.type) {
+				case 'start':
+					statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
+					break;
+				case 'status':
+					statusEl.textContent = data.message;
+					break;
+				case 'result':
+					resultCount++;
+					paperContainer.insertAdjacentHTML('beforeend', renderPaper(data.paper, data.similarity));
+					statusEl.textContent = resultCount + ' results found...';
+					break;
+				case 'complete':
+					const modeLabel = data.mode === 'semantic' ? 'semantic' : 'keyword';
+					statusEl.textContent = data.count + ' ' + modeLabel + ' results for "' + escapeHtml(query) + '"';
+					activeEventSource.close();
+					activeEventSource = null;
+					break;
+				case 'error':
+					statusEl.textContent = data.error;
+					statusEl.style.color = '#dc2626';
+					activeEventSource.close();
+					activeEventSource = null;
+					break;
+			}
+		};
+
+		activeEventSource.onerror = function() {
+			if (resultCount === 0) {
+				statusEl.textContent = 'Search failed - please try again';
+				statusEl.style.color = '#dc2626';
+			}
+			if (activeEventSource) {
+				activeEventSource.close();
+				activeEventSource = null;
+			}
+		};
+	}
+
+	modeInputs.forEach(function(radio) {
+		radio.addEventListener('change', function() {
+			const query = input.value.trim();
+			if (query) {
+				doStreamSearch(query, this.value);
+			}
+		});
+	});
+
+	form.addEventListener('submit', function(e) {
+		e.preventDefault();
+		const query = input.value.trim();
+		const mode = document.querySelector('input[name="search-mode"]:checked').value;
+		if (query) {
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&search-mode=' + mode);
+			doStreamSearch(query, mode);
+		}
+	});
+
+	const genBtn = document.getElementById('generate-embeddings-btn');
+	const genStatus = document.getElementById('embeddings-status');
+	if (genBtn) {
+		genBtn.addEventListener('click', async function() {
+			if (genStatus.dataset.generating) return;
+			genStatus.style.display = 'inline';
+			genStatus.dataset.generating = 'true';
+			genStatus.textContent = 'Generating embeddings...';
+			genBtn.disabled = true;
+
+			try {
+				const response = await fetch('/api/v1/embeddings/generate', { method: 'POST' });
+				if (!response.ok) throw new Error('Failed to generate embeddings');
+				const data = await response.json();
+				genStatus.textContent = 'Generated ' + (data.data?.count || 0) + ' embeddings!';
+				setTimeout(() => window.location.reload(), 1500);
+			} catch (err) {
+				genStatus.textContent = 'Error: ' + err.message;
+				genStatus.style.color = '#dc2626';
+				genBtn.disabled = false;
+				delete genStatus.dataset.generating;
+			}
+		});
+	}
+})();
+</script>
 {{template "foot" .}}
 {{end}}

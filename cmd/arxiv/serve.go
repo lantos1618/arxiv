@@ -70,6 +70,7 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/api/v1/", srv.handleAPIRoot)
 	mux.HandleFunc("/api/v1/papers/", srv.handleAPIPaper)
 	mux.HandleFunc("/api/v1/search", srv.handleAPISearch)
+	mux.HandleFunc("/api/v1/search/stream", srv.handleAPISearchStream)
 	mux.HandleFunc("/api/v1/search/semantic", srv.handleAPISearchSemantic)
 	mux.HandleFunc("/api/v1/search/pdf", srv.handleAPISearchPDF)
 	mux.HandleFunc("/api/v1/categories", srv.handleAPICategories)
