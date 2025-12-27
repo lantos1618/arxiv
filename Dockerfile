@@ -1,7 +1,7 @@
 FROM golang:1.24-alpine AS builder
 WORKDIR /build
 
-# Enable CGO for modernc.org/sqlite (pure Go with Wazero for WASM)
+# Use modernc.org/sqlite (pure Go, no CGO required)
 ENV CGO_ENABLED=0
 
 COPY go.mod go.sum ./

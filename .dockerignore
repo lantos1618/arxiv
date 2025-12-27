@@ -1,0 +1,22 @@
+# Cache data
+data/
+
+# Python files not needed for build
+get-pip.py
+tools/generate_embeddings.py
+tools/query_embedding.py
+tools/requirements.txt
+tools/__pycache__/
+
+# Git files
+.git/
+.gitignore
+
+# Test data
+test_data/
+
+# Documentation
+docs/
+
+# CI/CD files
+.github/
