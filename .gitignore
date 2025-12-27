@@ -1,8 +1,11 @@
 # Build artifacts
-arxiv
-arxiv-server
+/arxiv
+/arxiv-server
 *.exe
 *.test
+
+# Data directory (large, user-specific)
+/data/
 
 # IDE
 .vscode/

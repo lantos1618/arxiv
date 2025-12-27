@@ -93,6 +93,9 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/robots.txt", srv.handleRobots)
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 
+	// Admin routes (unlisted, secret)
+	mux.HandleFunc("/admin/embeddings", srv.handleAdminEmbeddings)
+
 	// Setup middleware
 	cacheMW := newCacheMiddleware(5 * time.Minute)   // Cache for 5 minutes
 	rateLimiter := newRateLimiter(1000, time.Minute) // Allow higher burst per IP
@@ -993,4 +996,34 @@ func (s *server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		"Categories": categories,
 	}
 	templates.ExecuteTemplate(w, "categories", data)
+}
+
+func (s *server) handleAdminEmbeddings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	stats, err := s.cache.Stats(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	pendingCount := stats.TotalPapers - stats.EmbeddingsCount
+	if pendingCount < 0 {
+		pendingCount = 0
+	}
+
+	percentComplete := float64(0)
+	if stats.TotalPapers > 0 {
+		percentComplete = float64(stats.EmbeddingsCount) / float64(stats.TotalPapers) * 100
+	}
+
+	estimatedMinutes := pendingCount / 100 // ~100 papers per minute on average
+
+	data := map[string]any{
+		"Title":            "Admin - Embeddings",
+		"Stats":            stats,
+		"PendingCount":     pendingCount,
+		"PercentComplete":  percentComplete,
+		"EstimatedMinutes": estimatedMinutes,
+	}
+	templates.ExecuteTemplate(w, "admin_embeddings", data)
 }

@@ -1,0 +1,145 @@
+{{define "api"}}
+{{template "head" .}}
+<style>
+.api-section { margin: 2rem 0; }
+.api-section h3 { color: #1e40af; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; }
+.endpoint { background: #f8fafc; border-left: 3px solid #3b82f6; padding: 0.75rem 1rem; margin: 0.75rem 0; border-radius: 0 4px 4px 0; }
+.endpoint code { background: #e0e7ff; padding: 0.2rem 0.4rem; border-radius: 3px; font-weight: 500; }
+.endpoint .method { color: #059669; font-weight: 600; }
+.endpoint .method.post { color: #dc2626; }
+.endpoint .desc { color: #4b5563; margin-top: 0.25rem; }
+.params { font-size: 0.9rem; color: #6b7280; margin-top: 0.5rem; }
+.params code { background: #f3f4f6; font-size: 0.85rem; }
+pre.example { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+pre.example code { background: none; color: inherit; }
+.badge-new { background: #10b981; color: white; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; margin-left: 0.5rem; }
+</style>
+
+<h1>API Documentation</h1>
+<p>This instance exposes a JSON-based REST API under <code>/api/v1/</code>. All responses use the format:</p>
+<pre class="example"><code>{ "success": true, "data": { ... }, "error": "..." }</code></pre>
+
+<div class="api-section">
+<h3>Papers</h3>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}</code>
+	<div class="desc">Get paper metadata, citation count, and references.</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}/citations</code>
+	<div class="desc">Get references cited by this paper.</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}/cited-by</code>
+	<div class="desc">Get papers that cite this paper.</div>
+	<div class="params">Query: <code>limit</code> (default: 50)</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}/graph</code>
+	<div class="desc">Get citation graph data (nodes and edges) for visualization.</div>
+</div>
+
+<div class="endpoint">
+	<span class="method post">POST</span> <code>/api/v1/papers/{id}/fetch</code>
+	<div class="desc">Fetch and cache a paper from arXiv.</div>
+	<div class="params">Query: <code>pdf=true</code>, <code>source=true</code> (default), <code>embedding=true</code></div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}/export/{format}</code>
+	<div class="desc">Export paper metadata. Formats: <code>bibtex</code>, <code>ris</code>, <code>json</code></div>
+</div>
+</div>
+
+<div class="api-section">
+<h3>Search</h3>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/search</code>
+	<div class="desc">Full-text search papers by title and abstract (FTS5).</div>
+	<div class="params">Query: <code>q</code> (required), <code>category</code>, <code>limit</code> (default: 20)</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/search/stream</code><span class="badge-new">NEW</span>
+	<div class="desc">Stream search results via Server-Sent Events (SSE) for real-time UI updates.</div>
+	<div class="params">Query: <code>q</code> (required), <code>category</code>, <code>limit</code> (default: 20)</div>
+	<div class="params">Header: <code>Accept: text/event-stream</code></div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/search/semantic</code><span class="badge-new">NEW</span>
+	<div class="desc">Semantic search using vector similarity. Finds papers by concept, not just keywords.</div>
+	<div class="params">Query: <code>q</code> (required), <code>limit</code> (default: 20)</div>
+	<div class="params">Requires embeddings to be generated first.</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/search/pdf</code>
+	<div class="desc">Search within downloaded PDF content.</div>
+	<div class="params">Query: <code>q</code> (required), <code>limit</code> (default: 50), <code>fuzzy=true</code></div>
+</div>
+</div>
+
+<div class="api-section">
+<h3>Embeddings<span class="badge-new">NEW</span></h3>
+
+<div class="endpoint">
+	<span class="method post">POST</span> <code>/api/v1/papers/{id}/embeddings</code>
+	<div class="desc">Generate embedding for a single paper (enables semantic search for this paper).</div>
+</div>
+
+<div class="endpoint">
+	<span class="method post">POST</span> <code>/api/v1/embeddings/generate</code>
+	<div class="desc">Generate embeddings for all papers in cache.</div>
+	<div class="params">Query: <code>limit</code> (optional, process only N papers)</div>
+	<div class="params">Header: <code>Accept: text/event-stream</code> for SSE progress updates</div>
+</div>
+</div>
+
+<div class="api-section">
+<h3>Categories & Stats</h3>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/categories</code>
+	<div class="desc">List all categories with paper counts.</div>
+</div>
+
+<div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/stats</code>
+	<div class="desc">Get cache statistics (total papers, downloads, queue status).</div>
+</div>
+</div>
+
+<h2>Examples</h2>
+<pre class="example"><code># Get paper metadata
+curl "{{.BaseURL}}/api/v1/papers/1706.03762"
+
+# Search papers (keyword)
+curl "{{.BaseURL}}/api/v1/search?q=transformer&amp;limit=10"
+
+# Semantic search (requires embeddings)
+curl "{{.BaseURL}}/api/v1/search/semantic?q=attention+mechanism&amp;limit=10"
+
+# Fetch paper with embedding generation
+curl -X POST "{{.BaseURL}}/api/v1/papers/2301.00001/fetch?embedding=true"
+
+# Generate embedding for a paper
+curl -X POST "{{.BaseURL}}/api/v1/papers/1706.03762/embeddings"
+
+# Get citation graph
+curl "{{.BaseURL}}/api/v1/papers/1706.03762/graph"
+
+# Export as BibTeX
+curl "{{.BaseURL}}/api/v1/papers/1706.03762/export/bibtex"</code></pre>
+
+<p style="margin-top: 2rem;">For complete API documentation, see: <a href="https://github.com/tmc/arxiv/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API.md on GitHub</a></p>
+
+{{template "foot" .}}
+{{end}}
+
+

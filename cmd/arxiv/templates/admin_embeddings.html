@@ -1,0 +1,403 @@
+{{define "admin_embeddings"}}
+{{template "head" .}}
+<style>
+	.admin-header { 
+		display: flex; 
+		justify-content: space-between; 
+		align-items: center; 
+		margin-bottom: 2rem; 
+	}
+	.admin-header h1 { margin: 0; }
+	.stats-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+		gap: 1rem;
+		margin: 1.5rem 0;
+	}
+	.stat-card {
+		background: #f8f9fa;
+		border: 1px solid #dee2e6;
+		border-radius: 8px;
+		padding: 1.25rem;
+		text-align: center;
+	}
+	.stat-value {
+		font-size: 2rem;
+		font-weight: 700;
+		color: #212529;
+	}
+	.stat-label {
+		font-size: 0.875rem;
+		color: #6c757d;
+		margin-top: 0.25rem;
+	}
+	.stat-card.highlight {
+		background: #e7f3ff;
+		border-color: #b6d4fe;
+	}
+	.stat-card.highlight .stat-value {
+		color: #0d6efd;
+	}
+	.stat-card.success {
+		background: #d1e7dd;
+		border-color: #badbcc;
+	}
+	.stat-card.success .stat-value {
+		color: #198754;
+	}
+	.control-panel {
+		background: #fff;
+		border: 1px solid #dee2e6;
+		border-radius: 8px;
+		padding: 1.5rem;
+		margin: 1.5rem 0;
+	}
+	.control-panel h3 {
+		margin-top: 0;
+		margin-bottom: 1rem;
+	}
+	.form-group {
+		margin-bottom: 1rem;
+	}
+	.form-group label {
+		display: block;
+		font-weight: 500;
+		margin-bottom: 0.5rem;
+	}
+	.form-group input[type="number"] {
+		padding: 0.5rem;
+		font-size: 1rem;
+		border: 1px solid #ced4da;
+		border-radius: 4px;
+		width: 150px;
+	}
+	.form-group small {
+		display: block;
+		color: #6c757d;
+		margin-top: 0.25rem;
+	}
+	.btn-lg {
+		padding: 0.75rem 2rem;
+		font-size: 1.1rem;
+	}
+	.btn-success {
+		background: #198754;
+	}
+	.btn-success:hover {
+		background: #157347;
+	}
+	.btn-danger {
+		background: #dc3545;
+	}
+	.btn-danger:hover {
+		background: #bb2d3b;
+	}
+	.terminal { 
+		background: #1e1e1e; 
+		border-radius: 8px; 
+		margin: 1.5rem 0; 
+		overflow: hidden;
+		display: none;
+	}
+	.terminal.active { display: block; }
+	.terminal-header {
+		background: #323232;
+		padding: 0.75rem 1rem;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+	.terminal-dot.red { background: #ff5f56; }
+	.terminal-dot.yellow { background: #ffbd2e; }
+	.terminal-dot.green { background: #27c93f; }
+	.terminal-title { color: #999; font-size: 0.75rem; font-family: monospace; margin-left: auto; }
+	.terminal-body {
+		padding: 1rem;
+		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+		font-size: 0.85rem;
+		line-height: 1.6;
+		color: #d4d4d4;
+		max-height: 400px;
+		overflow-y: auto;
+	}
+	.terminal-line { margin: 0.25rem 0; }
+	.terminal-line.prompt::before { content: "$ "; color: #4ec9b0; }
+	.terminal-line.info { color: #569cd6; }
+	.terminal-line.success { color: #4ec9b0; }
+	.terminal-line.error { color: #f14c4c; }
+	.terminal-line.progress { color: #dcdcaa; }
+	.terminal-cursor {
+		display: inline-block;
+		width: 8px;
+		height: 1em;
+		background: #d4d4d4;
+		animation: blink 1s step-end infinite;
+		vertical-align: text-bottom;
+	}
+	@keyframes blink { 50% { opacity: 0; } }
+	.progress-bar-container {
+		background: #323232;
+		border-radius: 4px;
+		height: 24px;
+		margin: 1rem 0;
+		overflow: hidden;
+		display: none;
+	}
+	.progress-bar-container.active { display: block; }
+	.progress-bar {
+		height: 100%;
+		background: linear-gradient(90deg, #4ec9b0, #569cd6);
+		transition: width 0.3s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: #fff;
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+	.warning-box {
+		background: #fff3cd;
+		border: 1px solid #ffeaa7;
+		border-radius: 8px;
+		padding: 1rem;
+		margin: 1rem 0;
+	}
+	.warning-box strong { color: #856404; }
+</style>
+
+<div class="admin-header">
+	<h1>Embedding Generation</h1>
+	<span class="badge" style="background: #6c757d; color: white; padding: 0.5rem 1rem;">Admin</span>
+</div>
+
+<div class="stats-grid">
+	<div class="stat-card">
+		<div class="stat-value">{{.Stats.TotalPapers}}</div>
+		<div class="stat-label">Total Papers</div>
+	</div>
+	<div class="stat-card success">
+		<div class="stat-value" id="embeddings-count">{{.Stats.EmbeddingsCount}}</div>
+		<div class="stat-label">With Embeddings</div>
+	</div>
+	<div class="stat-card highlight">
+		<div class="stat-value" id="pending-count">{{.PendingCount}}</div>
+		<div class="stat-label">Pending</div>
+	</div>
+	<div class="stat-card">
+		<div class="stat-value" id="progress-percent">{{printf "%.1f" .PercentComplete}}%</div>
+		<div class="stat-label">Complete</div>
+	</div>
+</div>
+
+<div class="control-panel">
+	<h3>Generate Embeddings</h3>
+	
+	<div class="warning-box">
+		<strong>Note:</strong> This process runs in the background. You can close this page and the generation will continue.
+		Each paper takes ~10-50ms depending on server load. Estimated time for {{.PendingCount}} papers: <strong id="eta">~{{.EstimatedMinutes}} minutes</strong>.
+	</div>
+
+	<div class="form-group">
+		<label for="limit">Batch Limit (0 = all pending)</label>
+		<input type="number" id="limit" value="0" min="0" step="100" placeholder="0">
+		<small>Process a specific number of papers, or leave at 0 to process all pending.</small>
+	</div>
+
+	<div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+		<button id="start-btn" class="btn btn-success btn-lg" onclick="startGeneration()">
+			Start Generation
+		</button>
+		<button id="stop-btn" class="btn btn-danger btn-lg" onclick="stopGeneration()" style="display: none;">
+			Stop
+		</button>
+	</div>
+</div>
+
+<div class="progress-bar-container" id="progress-container">
+	<div class="progress-bar" id="progress-bar" style="width: 0%;">0%</div>
+</div>
+
+<div class="terminal" id="terminal">
+	<div class="terminal-header">
+		<span class="terminal-dot red"></span>
+		<span class="terminal-dot yellow"></span>
+		<span class="terminal-dot green"></span>
+		<span class="terminal-title">embedding generation</span>
+	</div>
+	<div class="terminal-body" id="terminal-body">
+	</div>
+</div>
+
+<script>
+let eventSource = null;
+let isRunning = false;
+
+function log(message, type = '') {
+	const terminal = document.getElementById('terminal-body');
+	const line = document.createElement('div');
+	line.className = 'terminal-line' + (type ? ' ' + type : '');
+	line.textContent = message;
+	terminal.appendChild(line);
+	terminal.scrollTop = terminal.scrollHeight;
+}
+
+function updateProgress(current, total) {
+	const container = document.getElementById('progress-container');
+	const bar = document.getElementById('progress-bar');
+	container.classList.add('active');
+	
+	const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+	bar.style.width = percent + '%';
+	bar.textContent = percent + '% (' + current + '/' + total + ')';
+}
+
+function startGeneration() {
+	if (isRunning) return;
+	
+	const limit = document.getElementById('limit').value || 0;
+	const terminal = document.getElementById('terminal');
+	const terminalBody = document.getElementById('terminal-body');
+	const startBtn = document.getElementById('start-btn');
+	const stopBtn = document.getElementById('stop-btn');
+	
+	// Reset terminal
+	terminalBody.innerHTML = '';
+	terminal.classList.add('active');
+	
+	// Update UI
+	isRunning = true;
+	startBtn.style.display = 'none';
+	stopBtn.style.display = 'inline-block';
+	
+	log('python3 generate_embeddings.py' + (limit > 0 ? ' --limit ' + limit : ''), 'prompt');
+	log('Starting embedding generation...', 'info');
+	
+	// Start SSE connection
+	const params = new URLSearchParams();
+	if (limit > 0) params.append('limit', limit);
+	
+	eventSource = new EventSource('/api/v1/embeddings/generate?' + params.toString());
+	
+	// We need to use POST, but EventSource only does GET
+	// So we'll use fetch with POST instead
+	eventSource.close();
+	
+	fetch('/api/v1/embeddings/generate?' + params.toString(), {
+		method: 'POST',
+		headers: {
+			'Accept': 'text/event-stream',
+		}
+	}).then(response => {
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		
+		function read() {
+			reader.read().then(({done, value}) => {
+				if (done) {
+					onComplete();
+					return;
+				}
+				
+				buffer += decoder.decode(value, {stream: true});
+				const lines = buffer.split('\n');
+				buffer = lines.pop();
+				
+				for (const line of lines) {
+					if (line.startsWith('data: ')) {
+						try {
+							const data = JSON.parse(line.slice(6));
+							handleMessage(data);
+						} catch (e) {}
+					}
+				}
+				
+				read();
+			}).catch(err => {
+				log('Connection error: ' + err.message, 'error');
+				onComplete();
+			});
+		}
+		
+		read();
+	}).catch(err => {
+		log('Failed to start: ' + err.message, 'error');
+		onComplete();
+	});
+}
+
+function handleMessage(data) {
+	switch (data.type) {
+		case 'start':
+			log(data.message, 'info');
+			break;
+		case 'status':
+			log(data.message, 'info');
+			break;
+		case 'progress':
+			updateProgress(data.current, data.total);
+			log(data.message, 'progress');
+			break;
+		case 'complete':
+			log(data.message, 'success');
+			log('Total embeddings: ' + data.count, 'success');
+			document.getElementById('embeddings-count').textContent = data.count;
+			refreshStats();
+			onComplete();
+			break;
+		case 'error':
+			log('Error: ' + data.error, 'error');
+			if (data.count) {
+				document.getElementById('embeddings-count').textContent = data.count;
+			}
+			onComplete();
+			break;
+		case 'close':
+			onComplete();
+			break;
+	}
+}
+
+function stopGeneration() {
+	if (eventSource) {
+		eventSource.close();
+		eventSource = null;
+	}
+	log('Generation stopped by user.', 'error');
+	onComplete();
+}
+
+function onComplete() {
+	isRunning = false;
+	document.getElementById('start-btn').style.display = 'inline-block';
+	document.getElementById('stop-btn').style.display = 'none';
+	
+	// Add cursor at the end
+	const terminal = document.getElementById('terminal-body');
+	const cursor = document.createElement('div');
+	cursor.className = 'terminal-line prompt';
+	cursor.innerHTML = '<span class="terminal-cursor"></span>';
+	terminal.appendChild(cursor);
+	terminal.scrollTop = terminal.scrollHeight;
+}
+
+function refreshStats() {
+	fetch('/api/v1/stats')
+		.then(r => r.json())
+		.then(data => {
+			if (data.success && data.data) {
+				const stats = data.data;
+				document.getElementById('embeddings-count').textContent = stats.embeddings_count || 0;
+				const pending = stats.total_papers - (stats.embeddings_count || 0);
+				document.getElementById('pending-count').textContent = pending;
+				const percent = stats.total_papers > 0 ? 
+					((stats.embeddings_count || 0) / stats.total_papers * 100).toFixed(1) : 0;
+				document.getElementById('progress-percent').textContent = percent + '%';
+			}
+		});
+}
+</script>
+
+{{template "foot" .}}
+{{end}}
