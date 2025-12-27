@@ -67,6 +67,9 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux := http.NewServeMux()
 
 	// API routes (before other routes for proper matching)
+	mux.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/api/v1/", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("/api/v1/", srv.handleAPIRoot)
 	mux.HandleFunc("/api/v1/papers/", srv.handleAPIPaper)
 	mux.HandleFunc("/api/v1/search", srv.handleAPISearch)
@@ -530,17 +533,11 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 
 	id := path
 
-	// For canonical viewing, redirect plain /paper/{id} to /abs/{id}
-	// while keeping the /paper/ namespace for auxiliary actions
-	// like /paper/{id}/fetch, /graph, etc.
-	if !strings.Contains(id, "/") {
-		http.Redirect(w, r, "/abs/"+id, http.StatusMovedPermanently)
-		return
-	}
-
-	// Fallback: if we somehow reach here with a nested path that is not
-	// handled above, just 404 to avoid serving ambiguous routes.
-	http.NotFound(w, r)
+	// Redirect /paper/{id} to /abs/{id} for canonical viewing.
+	// All action routes (/fetch, /graph, /refs, etc.) are handled above,
+	// so anything reaching here is a plain paper ID - including old-style
+	// IDs with slashes like "astro-ph/0510857".
+	http.Redirect(w, r, "/abs/"+id, http.StatusMovedPermanently)
 }
 
 // handleAbs serves arXiv-style abstract URLs at /abs/{id}, mirroring arxiv.org.
@@ -736,19 +733,25 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSource(w http.ResponseWriter, r *http.Request) {
-	// Path format: /src/{paperID}/{filepath...}
 	path := strings.TrimPrefix(r.URL.Path, "/src/")
-	parts := strings.SplitN(path, "/", 2)
+	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
 		http.NotFound(w, r)
 		return
 	}
 
-	paperID := parts[0]
-	filePath := parts[1]
-
 	ctx := r.Context()
+
+	paperID := parts[0]
+	filePath := strings.Join(parts[1:], "/")
+
 	paper, err := s.cache.GetPaper(ctx, paperID)
+	if err != nil && len(parts) >= 3 {
+		paperID = parts[0] + "/" + parts[1]
+		filePath = strings.Join(parts[2:], "/")
+		paper, err = s.cache.GetPaper(ctx, paperID)
+	}
+
 	if err != nil || !paper.SourceDownloaded || paper.SourcePath == "" {
 		http.NotFound(w, r)
 		return

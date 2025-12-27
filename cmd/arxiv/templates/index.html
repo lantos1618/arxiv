@@ -1,5 +1,51 @@
 {{define "index"}}
 {{template "head" .}}
+<style>
+	.terminal { 
+		background: #ffffff; 
+		border: 1px solid #d1d5db; 
+		border-radius: 8px; 
+		margin: 1rem 0; 
+		overflow: hidden;
+		max-height: 0;
+		opacity: 0;
+		transition: max-height 0.3s ease, opacity 0.2s ease;
+	}
+	.terminal.active { max-height: 200px; opacity: 1; }
+	.terminal-header {
+		background: #f9fafb;
+		padding: 0.5rem 1rem;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		border-bottom: 1px solid #d1d5db;
+	}
+	.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+	.terminal-dot.red { background: #ff5f56; }
+	.terminal-dot.yellow { background: #ffbd2e; }
+	.terminal-dot.green { background: #27c93f; }
+	.terminal-title { color: #6b7280; font-size: 0.75rem; font-family: monospace; margin-left: auto; }
+	.terminal-body {
+		padding: 1rem;
+		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+		font-size: 0.85rem;
+		line-height: 1.6;
+		color: #1f2937;
+	}
+	.terminal-line { margin: 0.25rem 0; }
+	.terminal-line.prompt::before { content: "$ "; color: #059669; }
+	.terminal-line.info { color: #2563eb; }
+	.terminal-line.success { color: #059669; }
+	.terminal-cursor {
+		display: inline-block;
+		width: 8px;
+		height: 1em;
+		background: #1f2937;
+		animation: blink 1s step-end infinite;
+		vertical-align: text-bottom;
+	}
+	@keyframes blink { 50% { opacity: 0; } }
+</style>
 <h1>arXiv.gg</h1>
 <form class="search-form" action="/search" method="get" id="search-form">
 	<input type="text" name="q" id="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off">
@@ -16,7 +62,7 @@
 	</label>
 </div>
 <div id="search-results" class="search-results"></div>
-<p>{{.Stats.TotalPapers}} papers cached ({{.Stats.SourcesDownloaded}} with source, {{.Stats.PDFsDownloaded}} with PDF)</p>
+<p>{{.Stats.TotalPapers}} papers cached ({{.Stats.SourcesDownloaded}} with source, {{.Stats.PDFsDownloaded}} with PDF, {{.Stats.EmbeddingsCount}} with embeddings)</p>
 
 <div id="recent-papers">
 <h2>Recent Papers</h2>
@@ -119,7 +165,25 @@
 		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
 		const isSemantic = searchMode === 'semantic';
 		
-		results.innerHTML = '<p class="search-status" id="search-status">' + (isSemantic ? 'Semantic searching...' : 'Searching...') + '</p><div id="paper-results"></div>';
+		if (isSemantic) {
+			results.innerHTML = `
+				<div class="terminal active" id="search-terminal">
+					<div class="terminal-header">
+						<span class="terminal-dot red"></span>
+						<span class="terminal-dot yellow"></span>
+						<span class="terminal-dot green"></span>
+						<span class="terminal-title">semantic search</span>
+					</div>
+					<div class="terminal-body">
+						<div class="terminal-line prompt">search --semantic "${escapeHtml(query)}"</div>
+						<div class="terminal-line info" id="terminal-status">Generating query embedding...<span class="terminal-cursor"></span></div>
+					</div>
+				</div>
+				<p class="search-status" id="search-status" style="display:none;"></p>
+				<div id="paper-results"></div>`;
+		} else {
+			results.innerHTML = '<p class="search-status" id="search-status">Searching...</p><div id="paper-results"></div>';
+		}
 		recent.style.display = 'none';
 
 		const params = new URLSearchParams({ q: query, limit: '100' });
@@ -128,6 +192,8 @@
 		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
 		const paperContainer = document.getElementById('paper-results');
 		const statusEl = document.getElementById('search-status');
+		const terminalStatus = document.getElementById('terminal-status');
+		const terminal = document.getElementById('search-terminal');
 		let resultCount = 0;
 
 		activeEventSource.onmessage = function(e) {
@@ -135,25 +201,39 @@
 			
 			switch (data.type) {
 				case 'start':
-					statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
+					if (isSemantic && terminalStatus) {
+						terminalStatus.innerHTML = 'Generating query embedding...<span class="terminal-cursor"></span>';
+					} else {
+						statusEl.textContent = 'Searching...';
+					}
 					break;
 				case 'status':
-					statusEl.textContent = data.message;
+					if (isSemantic && terminalStatus) {
+						terminalStatus.innerHTML = data.message + '<span class="terminal-cursor"></span>';
+					} else {
+						statusEl.textContent = data.message;
+					}
 					break;
 				case 'result':
 					resultCount++;
+					if (terminal) terminal.classList.remove('active');
+					statusEl.style.display = '';
 					const paper = data.paper;
 					const similarity = data.similarity || null;
 					paperContainer.insertAdjacentHTML('beforeend', renderPaper(paper, similarity));
 					statusEl.textContent = resultCount + ' results found...';
 					break;
 				case 'complete':
+					if (terminal) terminal.classList.remove('active');
+					statusEl.style.display = '';
 					const modeLabel = data.mode === 'semantic' ? 'semantic' : 'keyword';
 					statusEl.textContent = data.count + ' ' + modeLabel + ' results for "' + escapeHtml(query) + '"';
 					activeEventSource.close();
 					activeEventSource = null;
 					break;
 				case 'error':
+					if (terminal) terminal.classList.remove('active');
+					statusEl.style.display = '';
 					statusEl.textContent = data.error;
 					statusEl.style.color = '#dc2626';
 					activeEventSource.close();
@@ -176,23 +256,20 @@
 
 	input.addEventListener('input', function() {
 		clearTimeout(timeout);
-		timeout = setTimeout(() => doSearch(input.value), 300);
+		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
+		if (searchMode === 'keyword') {
+			timeout = setTimeout(() => doSearch(input.value), 300);
+		}
 	});
 
-	// Also handle form submit for immediate redirect on arXiv IDs or semantic search
 	document.getElementById('search-form').addEventListener('submit', function(e) {
+		e.preventDefault();
 		const arxivID = extractArxivID(input.value);
 		if (arxivID) {
-			e.preventDefault();
 			window.location.href = '/paper/' + arxivID;
 			return;
 		}
-		
-		const searchMode = document.querySelector('input[name="search-mode"]:checked').value;
-		if (searchMode === 'semantic') {
-			e.preventDefault();
-			doSearch(input.value);
-		}
+		doSearch(input.value);
 	});
 
 })();

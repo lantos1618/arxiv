@@ -117,17 +117,16 @@ func (c *Cache) GetPaperFresh(ctx context.Context, id string) (*Paper, error) {
 }
 
 func (c *Cache) downloadPDF(ctx context.Context, paper *Paper) (string, error) {
-	// Organize by paper ID prefix for large-scale storage
-	// e.g., 2301.00001 -> pdf/2301/2301.00001.pdf
 	prefix := paperPrefix(paper.ID)
 	dir := filepath.Join(c.root, "pdf", prefix)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
 
 	path := filepath.Join(dir, paper.ID+".pdf")
 	if _, err := os.Stat(path); err == nil {
-		return path, nil // Already exists
+		return path, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return "", err
 	}
 
 	resp, err := httpGetWithContext(ctx, paper.PDFURL())

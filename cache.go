@@ -140,6 +140,10 @@ func (c *Cache) Stats(ctx context.Context) (*CacheStats, error) {
 		return nil, err
 	}
 
+	if err := c.db.WithContext(ctx).Model(&Embedding{}).Count(&stats.EmbeddingsCount).Error; err != nil {
+		return nil, err
+	}
+
 	return stats, nil
 }
 
@@ -163,6 +167,7 @@ type CacheStats struct {
 	PDFsDownloaded    int64
 	SourcesDownloaded int64
 	QueuedDownloads   int64
+	EmbeddingsCount   int64
 }
 
 // GenerateEmbeddingForPaper generates an embedding for a single paper.

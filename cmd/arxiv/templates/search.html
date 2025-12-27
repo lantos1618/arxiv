@@ -5,6 +5,52 @@
 	#search-status { color: #4b5563; font-style: italic; }
 	#paper-results .paper { animation: fadeIn 0.2s ease-out; }
 	@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+	.terminal { 
+		background: #ffffff; 
+		border: 1px solid #d1d5db; 
+		border-radius: 8px; 
+		margin: 1rem 0; 
+		overflow: hidden;
+		max-height: 0;
+		opacity: 0;
+		transition: max-height 0.3s ease, opacity 0.2s ease;
+	}
+	.terminal.active { max-height: 200px; opacity: 1; }
+	.terminal-header {
+		background: #f9fafb;
+		padding: 0.5rem 1rem;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		border-bottom: 1px solid #d1d5db;
+	}
+	.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+	.terminal-dot.red { background: #ff5f56; }
+	.terminal-dot.yellow { background: #ffbd2e; }
+	.terminal-dot.green { background: #27c93f; }
+	.terminal-title { color: #6b7280; font-size: 0.75rem; font-family: monospace; margin-left: auto; }
+	.terminal-body {
+		padding: 1rem;
+		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+		font-size: 0.85rem;
+		line-height: 1.6;
+		color: #1f2937;
+	}
+	.terminal-line { margin: 0.25rem 0; }
+	.terminal-line.prompt::before { content: "$ "; color: #059669; }
+	.terminal-line.output { color: #6b7280; }
+	.terminal-line.success { color: #059669; }
+	.terminal-line.info { color: #2563eb; }
+	.terminal-cursor {
+		display: inline-block;
+		width: 8px;
+		height: 1em;
+		background: #1f2937;
+		animation: blink 1s step-end infinite;
+		vertical-align: text-bottom;
+	}
+	@keyframes blink { 50% { opacity: 0; } }
 </style>
 <h1>Search Results</h1>
 <form class="search-form" action="/search" method="get" id="search-form">
@@ -121,38 +167,81 @@
 		}
 
 		const isSemantic = mode === 'semantic';
-		paperContainer.innerHTML = '';
-		statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
 		statusEl.style.color = '';
+
+		let terminalEl = document.getElementById('search-terminal');
+		if (isSemantic) {
+			if (!terminalEl) {
+				const terminalHtml = `
+					<div class="terminal active" id="search-terminal">
+						<div class="terminal-header">
+							<span class="terminal-dot red"></span>
+							<span class="terminal-dot yellow"></span>
+							<span class="terminal-dot green"></span>
+							<span class="terminal-title">semantic search</span>
+						</div>
+						<div class="terminal-body">
+							<div class="terminal-line prompt">search --semantic "${escapeHtml(query)}"</div>
+							<div class="terminal-line info" id="terminal-status">Generating query embedding...<span class="terminal-cursor"></span></div>
+						</div>
+					</div>`;
+				paperContainer.insertAdjacentHTML('beforebegin', terminalHtml);
+				terminalEl = document.getElementById('search-terminal');
+			} else {
+				terminalEl.classList.add('active');
+				document.getElementById('terminal-status').innerHTML = 'Generating query embedding...<span class="terminal-cursor"></span>';
+			}
+			statusEl.style.display = 'none';
+		} else {
+			if (terminalEl) terminalEl.classList.remove('active');
+			statusEl.style.display = '';
+			statusEl.textContent = 'Searching...';
+		}
+		paperContainer.innerHTML = '';
 
 		const params = new URLSearchParams({ q: query, limit: '100' });
 		if (isSemantic) params.append('mode', 'semantic');
 
 		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
 		let resultCount = 0;
+		const terminalStatus = document.getElementById('terminal-status');
 
 		activeEventSource.onmessage = function(e) {
 			const data = JSON.parse(e.data);
 			
 			switch (data.type) {
 				case 'start':
-					statusEl.textContent = isSemantic ? 'Generating embedding...' : 'Searching...';
+					if (isSemantic && terminalStatus) {
+						terminalStatus.innerHTML = 'Generating query embedding...<span class="terminal-cursor"></span>';
+					} else {
+						statusEl.textContent = 'Searching...';
+					}
 					break;
 				case 'status':
-					statusEl.textContent = data.message;
+					if (isSemantic && terminalStatus) {
+						terminalStatus.innerHTML = data.message + '<span class="terminal-cursor"></span>';
+					} else {
+						statusEl.textContent = data.message;
+					}
 					break;
 				case 'result':
 					resultCount++;
+					if (terminalEl) terminalEl.classList.remove('active');
+					statusEl.style.display = '';
 					paperContainer.insertAdjacentHTML('beforeend', renderPaper(data.paper, data.similarity));
 					statusEl.textContent = resultCount + ' results found...';
 					break;
 				case 'complete':
+					if (terminalEl) terminalEl.classList.remove('active');
+					statusEl.style.display = '';
 					const modeLabel = data.mode === 'semantic' ? 'semantic' : 'keyword';
 					statusEl.textContent = data.count + ' ' + modeLabel + ' results for "' + escapeHtml(query) + '"';
 					activeEventSource.close();
 					activeEventSource = null;
 					break;
 				case 'error':
+					if (terminalEl) terminalEl.classList.remove('active');
+					statusEl.style.display = '';
 					statusEl.textContent = data.error;
 					statusEl.style.color = '#dc2626';
 					activeEventSource.close();
