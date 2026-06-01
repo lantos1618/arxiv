@@ -166,6 +166,7 @@ func (c *Cache) initSchema() error {
 		&User{},
 		&LoginCode{},
 		&UserSession{},
+		&UserPaperView{},
 		&AdminAuditLog{},
 	); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)

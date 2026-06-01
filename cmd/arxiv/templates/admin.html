@@ -129,6 +129,8 @@
 		<div class="admin-metric"><div class="admin-metric-label">Active 24h</div><div class="admin-metric-value">{{formatInt .Stats.Users.Active24h}}</div><div class="admin-metric-note">Recent sessions.</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Free</div><div class="admin-metric-value">{{formatInt .Stats.Users.FreeUsers}}</div><div class="admin-metric-note">users.plan = free</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div><div class="admin-metric-note">users.plan = paid</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Paper views</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaperViews}}</div><div class="admin-metric-note">Signed-in reading history.</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Viewers 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers7d}}</div><div class="admin-metric-note">Users who opened papers.</div></div>
 	</div>
 	<p><a href="/admin/users">Open users</a></p>
 </div>

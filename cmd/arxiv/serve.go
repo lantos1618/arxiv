@@ -1108,6 +1108,12 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 	fetchingSource := false
 	// Note: Client handles prefetch via /prefetch-refs endpoint
 
+	var currentUser *arxiv.User
+	if user, ok := s.currentUser(r); ok {
+		currentUser = user
+		s.recordPaperView(user.ID, paper.ID)
+	}
+
 	hasEmbedding := s.cache.HasQwenEmbedding(ctx, id)
 
 	data := map[string]any{
@@ -1124,7 +1130,20 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 		"HasEmbedding":   hasEmbedding,
 		"LocalMode":      s.localMode,
 	}
+	if currentUser != nil {
+		data["CurrentUser"] = currentUser
+	}
 	s.renderTemplate(w, r, "paper", data)
+}
+
+func (s *server) recordPaperView(userID, paperID string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.cache.RecordUserPaperView(ctx, userID, paperID); err != nil {
+			log.Printf("record paper view failed: %v", err)
+		}
+	}()
 }
 
 func (s *server) handleAuthor(w http.ResponseWriter, r *http.Request) {

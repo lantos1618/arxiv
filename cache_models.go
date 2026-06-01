@@ -282,6 +282,21 @@ func (UserSession) TableName() string {
 	return "user_sessions"
 }
 
+// UserPaperView stores a compact per-user reading history.
+type UserPaperView struct {
+	UserID        string    `gorm:"primaryKey;column:user_id"`
+	PaperID       string    `gorm:"primaryKey;column:paper_id;index"`
+	ViewCount     int       `gorm:"column:view_count;default:1"`
+	FirstViewedAt time.Time `gorm:"column:first_viewed_at;autoCreateTime;index"`
+	LastViewedAt  time.Time `gorm:"column:last_viewed_at;autoUpdateTime;index"`
+	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (UserPaperView) TableName() string {
+	return "user_paper_views"
+}
+
 // AdminAuditLog records human admin reads and future admin mutations.
 type AdminAuditLog struct {
 	ID         string    `gorm:"primaryKey;column:id"`

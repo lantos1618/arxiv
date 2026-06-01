@@ -1,5 +1,13 @@
 {{define "account"}}
 {{template "head" .}}
+<style>
+	.account-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin-bottom: 1rem; }
+	.account-table th, .account-table td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.45rem; text-align: left; vertical-align: top; }
+	.account-table th { color: #374151; font-weight: 700; background: #f9fafb; }
+	@media (max-width: 760px) {
+		.account-table { display: block; overflow-x: auto; white-space: nowrap; }
+	}
+</style>
 <h1>Account</h1>
 <div class="account-summary">
 	{{if .User.PictureURL}}<p><img src="{{.User.PictureURL}}" alt="" width="48" height="48" style="border-radius:50%;"></p>{{end}}
@@ -15,6 +23,25 @@
 	<li>Topic, author, and category alerts.</li>
 	<li>Full-body paper search while it is free during testing.</li>
 </ul>
+
+<h2>Recently Viewed</h2>
+{{if .RecentViews}}
+<table class="account-table">
+	<thead><tr><th>Paper</th><th>Categories</th><th>Views</th><th>Last viewed</th></tr></thead>
+	<tbody>
+		{{range .RecentViews}}
+		<tr>
+			<td><a href="{{paperPath .PaperID}}">{{if .PaperTitle}}{{.PaperTitle}}{{else}}{{.PaperID}}{{end}}</a><br><code>{{.PaperID}}</code></td>
+			<td>{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}">{{$c}}</a>{{end}}</td>
+			<td>{{.ViewCount}}</td>
+			<td>{{timeStamp .LastViewedAt}}</td>
+		</tr>
+		{{end}}
+	</tbody>
+</table>
+{{else}}
+<p>No signed-in paper views yet.</p>
+{{end}}
 
 <form method="post" action="/logout">
 	<button class="btn btn-secondary" type="submit">Sign out</button>

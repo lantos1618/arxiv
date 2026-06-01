@@ -200,9 +200,15 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?next=/account", http.StatusSeeOther)
 		return
 	}
+	views, err := s.cache.RecentUserPaperViews(r.Context(), user.ID, 25)
+	if err != nil {
+		log.Printf("account recent views failed: %v", err)
+		views = []arxiv.UserPaperViewRow{}
+	}
 	s.renderTemplate(w, r, "account", map[string]any{
-		"Title": "Account",
-		"User":  user,
+		"Title":       "Account",
+		"User":        user,
+		"RecentViews": views,
 	})
 }
 

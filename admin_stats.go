@@ -16,6 +16,7 @@ type AdminStats struct {
 	Users          AdminUserStats
 	EmbeddingJobs  map[string]int64
 	RecentUsers    []AdminUserRow
+	RecentViews    []UserPaperViewRow
 	RecentAuditLog []AdminAuditRow
 }
 
@@ -51,6 +52,9 @@ type AdminUserStats struct {
 	FreeUsers      int64
 	PaidUsers      int64
 	UnsetPlanUsers int64
+	PaperViews     int64
+	Viewers24h     int64
+	Viewers7d      int64
 }
 
 type AdminUserRow struct {
@@ -145,6 +149,11 @@ func (c *Cache) refreshAdminStatsLocked(ctx context.Context) (*AdminStats, error
 		return nil, err
 	}
 	stats.RecentUsers = recentUsers
+	recentViews, err := c.RecentAdminPaperViews(ctx, 50)
+	if err != nil {
+		return nil, err
+	}
+	stats.RecentViews = recentViews
 	recentAudit, err := c.RecentAdminAudit(ctx, 50)
 	if err != nil {
 		return nil, err
@@ -203,6 +212,7 @@ func cloneAdminStats(stats *AdminStats) *AdminStats {
 		}
 	}
 	clone.RecentUsers = append([]AdminUserRow(nil), stats.RecentUsers...)
+	clone.RecentViews = append([]UserPaperViewRow(nil), stats.RecentViews...)
 	clone.RecentAuditLog = append([]AdminAuditRow(nil), stats.RecentAuditLog...)
 	return &clone
 }
@@ -336,7 +346,29 @@ func (c *Cache) countUsersForAdmin(ctx context.Context, out *AdminUserStats, now
 	if err := c.db.WithContext(ctx).Model(&User{}).Where("plan = ?", "paid").Count(&out.PaidUsers).Error; err != nil {
 		return err
 	}
-	return c.db.WithContext(ctx).Model(&User{}).Where("plan = '' OR plan IS NULL").Count(&out.UnsetPlanUsers).Error
+	if err := c.db.WithContext(ctx).Model(&User{}).Where("plan = '' OR plan IS NULL").Count(&out.UnsetPlanUsers).Error; err != nil {
+		return err
+	}
+	if err := c.db.WithContext(ctx).Model(&UserPaperView{}).
+		Select("COALESCE(SUM(view_count), 0)").
+		Scan(&out.PaperViews).Error; err != nil {
+		return err
+	}
+	for _, window := range []struct {
+		since time.Time
+		count *int64
+	}{
+		{now.Add(-24 * time.Hour), &out.Viewers24h},
+		{now.Add(-7 * 24 * time.Hour), &out.Viewers7d},
+	} {
+		if err := c.db.WithContext(ctx).Model(&UserPaperView{}).
+			Where("last_viewed_at >= ?", window.since).
+			Distinct("user_id").
+			Count(window.count).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Cache) RecentAdminUsers(ctx context.Context, limit int) ([]AdminUserRow, error) {
