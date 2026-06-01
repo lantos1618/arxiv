@@ -366,58 +366,60 @@ func (c *Cache) SimilarPaperMapQwen(ctx context.Context, paperID string, limit i
 		return nil, nil, fmt.Errorf("similar paper maps require PostgreSQL with pgvector")
 	}
 
-	query := `
-		WITH anchor AS (
-			SELECT paper_id, vector
-			FROM embeddings_v2
-			WHERE paper_id = $1
-			  AND scope = 'abstract'
-			  AND model = $2
-			  AND dim = $3
-			  AND vector IS NOT NULL
-			LIMIT 1
-		),
-		neighbors AS (
-			SELECT e.paper_id,
-			       1 - (e.vector <=> a.vector) AS similarity,
-			       e.vector::text AS vector_text,
-			       false AS is_anchor
-			FROM embeddings_v2 e
-			CROSS JOIN anchor a
-			WHERE e.paper_id <> $1
-			  AND e.scope = 'abstract'
-			  AND e.model = $2
-			  AND e.dim = $3
-			  AND e.vector IS NOT NULL
-			ORDER BY e.vector <=> a.vector
-			LIMIT $4
-		)
-		SELECT paper_id, similarity, vector_text, is_anchor
-		FROM (
-			SELECT paper_id, 1.0::double precision AS similarity, vector::text AS vector_text, true AS is_anchor
-			FROM anchor
-			UNION ALL
-			SELECT paper_id, similarity, vector_text, is_anchor
-			FROM neighbors
-		) mapped
-	`
-
 	sqlDB, err := c.db.DB()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rows, err := sqlDB.QueryContext(ctx, query, paperID, qwenEmbeddingModel, qwenEmbeddingDim, limit)
+	var anchorVectorText string
+	if err := sqlDB.QueryRowContext(ctx, `
+		SELECT vector::text
+		FROM embeddings_v2
+		WHERE paper_id = $1
+		  AND scope = 'abstract'
+		  AND model = $2
+		  AND dim = $3
+		  AND vector IS NOT NULL
+		LIMIT 1
+	`, paperID, qwenEmbeddingModel, qwenEmbeddingDim).Scan(&anchorVectorText); err != nil {
+		return nil, nil, fmt.Errorf("paper qwen embedding not found: %w", err)
+	}
+
+	anchorVector, err := parsePgVectorText(anchorVectorText)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse vector for %s: %w", paperID, err)
+	}
+
+	query := `
+		SELECT e.paper_id,
+		       1 - (e.vector <=> $1::vector) AS similarity,
+		       e.vector::text AS vector_text
+		FROM embeddings_v2 e
+		WHERE e.paper_id <> $2
+		  AND e.scope = 'abstract'
+		  AND e.model = $3
+		  AND e.dim = $4
+		  AND e.vector IS NOT NULL
+		ORDER BY e.vector <=> $1::vector
+		LIMIT $5
+	`
+
+	rows, err := sqlDB.QueryContext(ctx, query, anchorVectorText, paperID, qwenEmbeddingModel, qwenEmbeddingDim, limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("qwen similar paper map query failed: %w", err)
 	}
 	defer rows.Close()
 
-	vectorRows := []semanticVectorRow{}
+	vectorRows := []semanticVectorRow{{
+		PaperID:    paperID,
+		Similarity: 1,
+		Vector:     anchorVector,
+		Anchor:     true,
+	}}
 	for rows.Next() {
 		var r semanticVectorRow
 		var vectorText string
-		if err := rows.Scan(&r.PaperID, &r.Similarity, &vectorText, &r.Anchor); err != nil {
+		if err := rows.Scan(&r.PaperID, &r.Similarity, &vectorText); err != nil {
 			return nil, nil, err
 		}
 		r.Vector, err = parsePgVectorText(vectorText)
