@@ -286,7 +286,7 @@ func (UserSession) TableName() string {
 type UserPaperView struct {
 	UserID        string    `gorm:"primaryKey;column:user_id"`
 	PaperID       string    `gorm:"primaryKey;column:paper_id;index"`
-	ViewCount     int       `gorm:"column:view_count;default:1"`
+	ViewCount     int64     `gorm:"column:view_count;default:1"`
 	FirstViewedAt time.Time `gorm:"column:first_viewed_at;autoCreateTime;index"`
 	LastViewedAt  time.Time `gorm:"column:last_viewed_at;autoUpdateTime;index"`
 	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime"`
