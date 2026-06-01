@@ -105,6 +105,7 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	if embeddingServiceURL == "" {
 		embeddingServiceURL = os.Getenv("EMBEDDING_SERVICE_URL")
 	}
+	qwenEmbeddingServiceURL := strings.TrimSpace(os.Getenv("QWEN_EMBEDDING_SERVICE_URL"))
 	trustProxyHeaders := os.Getenv("TRUST_PROXY_HEADERS") == "true"
 	indexNowKey := configuredIndexNowKey()
 	officialArxivPapers := configuredOfficialArxivPapers()
@@ -120,15 +121,16 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	cache.StartAdminStatsRefresh(ctx)
 
 	srv := &server{
-		cache:               cache,
-		cacheDir:            cacheDir,
-		localMode:           *localMode,
-		paperBroadcast:      newPaperBroadcaster(),
-		embeddingServiceURL: embeddingServiceURL,
-		indexNowKey:         indexNowKey,
-		officialArxivPapers: officialArxivPapers,
-		officialArxivAsOf:   officialArxivPapersAsOf,
-		trustProxyHeaders:   trustProxyHeaders,
+		cache:                   cache,
+		cacheDir:                cacheDir,
+		localMode:               *localMode,
+		paperBroadcast:          newPaperBroadcaster(),
+		embeddingServiceURL:     embeddingServiceURL,
+		qwenEmbeddingServiceURL: qwenEmbeddingServiceURL,
+		indexNowKey:             indexNowKey,
+		officialArxivPapers:     officialArxivPapers,
+		officialArxivAsOf:       officialArxivPapersAsOf,
+		trustProxyHeaders:       trustProxyHeaders,
 		publicEmbeddingLimiter: newRateLimiter(
 			6,
 			time.Minute,
@@ -238,14 +240,15 @@ type server struct {
 	paperBroadcast *paperBroadcaster
 
 	// Embedding service configuration
-	embeddingServiceURL    string
-	embeddingWorker        *arxiv.EmbeddingWorker
-	indexNowKey            string
-	officialArxivPapers    int64
-	officialArxivAsOf      string
-	trustProxyHeaders      bool
-	publicEmbeddingLimiter *rateLimiter
-	loginLimiter           *rateLimiter
+	embeddingServiceURL     string
+	qwenEmbeddingServiceURL string
+	embeddingWorker         *arxiv.EmbeddingWorker
+	indexNowKey             string
+	officialArxivPapers     int64
+	officialArxivAsOf       string
+	trustProxyHeaders       bool
+	publicEmbeddingLimiter  *rateLimiter
+	loginLimiter            *rateLimiter
 }
 
 func configuredIndexNowKey() string {
@@ -688,8 +691,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	searchMode := r.URL.Query().Get("search-mode")
-	isSemantic := searchMode == "semantic"
+	searchMode := normalizeSearchMode(r)
 
 	if r.URL.Query().Get("format") == "json" {
 		papers, err := s.cache.Search(ctx, query, "", 100)
@@ -724,44 +726,74 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	var data map[string]any
 
-	if isSemantic {
-		count, err := s.cache.CountEmbeddings(ctx)
+	if searchMode == "search" || searchMode == "deep" {
+		if searchMode == "deep" {
+			if _, ok := s.currentUser(r); !ok {
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+				return
+			}
+		}
+
+		stats, err := s.cache.Stats(ctx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		if count == 0 {
+		if stats.QwenEmbeddingsCount == 0 {
 			data = map[string]any{
 				"Title":           "Search",
 				"Query":           query,
+				"SearchMode":      searchMode,
 				"IsSemantic":      true,
+				"IsDeep":          searchMode == "deep",
 				"NoEmbeddings":    true,
 				"Papers":          []arxiv.Paper{},
 				"SemanticResults": []arxiv.SemanticResult{},
+				"DeepResults":     []arxiv.DeepSearchResult{},
 			}
 			s.renderTemplate(w, r, "search", data)
 			return
 		}
 
-		queryEmbedding, err := s.generateQueryEmbedding(ctx, query)
+		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
-			http.Error(w, "Failed to generate query embedding: "+err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "Failed to understand query: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
-		semanticResults, err := s.cache.SearchSemantic(ctx, queryEmbedding, 100)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		data = map[string]any{
-			"Title":           "Search",
-			"Query":           query,
-			"IsSemantic":      true,
-			"Papers":          []arxiv.Paper{},
-			"SemanticResults": semanticResults,
+		if searchMode == "deep" {
+			deepResults, err := s.cache.SearchDeepQwen(ctx, queryEmbedding, 100)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			data = map[string]any{
+				"Title":           "Search",
+				"Query":           query,
+				"SearchMode":      searchMode,
+				"IsSemantic":      true,
+				"IsDeep":          true,
+				"Papers":          []arxiv.Paper{},
+				"SemanticResults": []arxiv.SemanticResult{},
+				"DeepResults":     deepResults,
+			}
+		} else {
+			semanticResults, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, 100)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			data = map[string]any{
+				"Title":           "Search",
+				"Query":           query,
+				"SearchMode":      searchMode,
+				"IsSemantic":      true,
+				"IsDeep":          false,
+				"Papers":          []arxiv.Paper{},
+				"SemanticResults": semanticResults,
+				"DeepResults":     []arxiv.DeepSearchResult{},
+			}
 		}
 	} else {
 		papers, err := s.cache.Search(ctx, query, "", 100)
@@ -773,9 +805,12 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		data = map[string]any{
 			"Title":           "Search",
 			"Query":           query,
+			"SearchMode":      searchMode,
 			"IsSemantic":      false,
+			"IsDeep":          false,
 			"Papers":          papers,
 			"SemanticResults": []arxiv.SemanticResult{},
+			"DeepResults":     []arxiv.DeepSearchResult{},
 		}
 	}
 
@@ -825,7 +860,7 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		// Broadcast new paper to all SSE subscribers
 		s.paperBroadcast.Broadcast(paperEvent{
 			Paper:        *paper,
-			HasEmbedding: s.cache.HasEmbedding(ctx, paper.ID),
+			HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 		})
 
 		// Redirect to paper page
@@ -1034,7 +1069,7 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 			// Broadcast new paper to all SSE subscribers
 			s.paperBroadcast.Broadcast(paperEvent{
 				Paper:        *paper,
-				HasEmbedding: s.cache.HasEmbedding(ctx, paper.ID),
+				HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 			})
 		} else {
 			http.NotFound(w, r)
@@ -1073,7 +1108,7 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 	fetchingSource := false
 	// Note: Client handles prefetch via /prefetch-refs endpoint
 
-	hasEmbedding := s.cache.HasEmbedding(ctx, id)
+	hasEmbedding := s.cache.HasQwenEmbedding(ctx, id)
 
 	data := map[string]any{
 		"Title":          paper.Title,

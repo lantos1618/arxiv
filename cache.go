@@ -415,6 +415,11 @@ func (c *Cache) refreshStatsLocked(ctx context.Context) (*CacheStats, error) {
 	if err := c.db.WithContext(ctx).Model(&Embedding{}).Count(&stats.EmbeddingsCount).Error; err != nil {
 		return nil, err
 	}
+	if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+		Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
+		Count(&stats.QwenEmbeddingsCount).Error; err != nil {
+		return nil, err
+	}
 
 	c.statsMu.Lock()
 	c.cachedStats = stats
@@ -466,6 +471,15 @@ func (c *Cache) HasEmbedding(ctx context.Context, paperID string) bool {
 	return count > 0
 }
 
+// HasQwenEmbedding checks if a paper has a Qwen abstract embedding.
+func (c *Cache) HasQwenEmbedding(ctx context.Context, paperID string) bool {
+	var count int64
+	c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+		Where("paper_id = ? AND scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", paperID, "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
+		Count(&count)
+	return count > 0
+}
+
 // GetEmbeddingIDs returns a set of paper IDs that have embeddings.
 func (c *Cache) GetEmbeddingIDs(ctx context.Context) (map[string]bool, error) {
 	var ids []string
@@ -500,13 +514,67 @@ func (c *Cache) GetEmbeddingIDsFor(ctx context.Context, paperIDs []string) (map[
 	return result, nil
 }
 
+// GetQwenEmbeddingIDsFor returns which paper IDs have Qwen abstract embeddings.
+func (c *Cache) GetQwenEmbeddingIDsFor(ctx context.Context, paperIDs []string) (map[string]bool, error) {
+	if len(paperIDs) == 0 {
+		return map[string]bool{}, nil
+	}
+	var ids []string
+	err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+		Where("paper_id IN ? AND scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", paperIDs, "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
+		Pluck("paper_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		result[id] = true
+	}
+	return result, nil
+}
+
+// StoreQwenAbstractEmbedding stores one Qwen abstract embedding.
+func (c *Cache) StoreQwenAbstractEmbedding(ctx context.Context, paperID, sourceHash string, textChars, tokenEstimate int, embedding []float32) error {
+	if c.dbType != DBTypePostgres {
+		return fmt.Errorf("qwen embeddings require PostgreSQL with pgvector")
+	}
+	if len(embedding) != qwenEmbeddingDim {
+		return fmt.Errorf("qwen embedding has %d dimensions, want %d", len(embedding), qwenEmbeddingDim)
+	}
+	if tokenEstimate <= 0 {
+		tokenEstimate = 1
+	}
+
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return err
+	}
+	_, err = sqlDB.ExecContext(ctx, `
+		INSERT INTO embeddings_v2
+			(paper_id, scope, model, dim, source_hash, text_chars,
+			 token_estimate, vector, created, updated)
+		VALUES ($1, 'abstract', $2, $3, $4, $5, $6, $7::vector, now(), now())
+		ON CONFLICT (paper_id, scope, model, dim) DO UPDATE SET
+			source_hash = EXCLUDED.source_hash,
+			text_chars = EXCLUDED.text_chars,
+			token_estimate = EXCLUDED.token_estimate,
+			vector = EXCLUDED.vector,
+			updated = now()
+	`, paperID, qwenEmbeddingModel, qwenEmbeddingDim, sourceHash, textChars, tokenEstimate, float32SliceToVectorString(embedding))
+	if err != nil {
+		return fmt.Errorf("store qwen abstract embedding: %w", err)
+	}
+	return nil
+}
+
 // CacheStats contains statistics about the cache.
 type CacheStats struct {
-	TotalPapers       int64
-	PDFsDownloaded    int64
-	SourcesDownloaded int64
-	QueuedDownloads   int64
-	EmbeddingsCount   int64
+	TotalPapers         int64
+	PDFsDownloaded      int64
+	SourcesDownloaded   int64
+	QueuedDownloads     int64
+	EmbeddingsCount     int64
+	QwenEmbeddingsCount int64
 }
 
 // GenerateEmbeddingForPaper generates an embedding for a single paper.

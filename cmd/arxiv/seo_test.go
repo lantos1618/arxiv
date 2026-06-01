@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,28 @@ func TestIndexNowKeyValidation(t *testing.T) {
 	for _, key := range []string{"short", "has/slash", "has.dot", "has space"} {
 		if isSafeIndexNowKey(key) {
 			t.Fatalf("expected key %q to be rejected", key)
+		}
+	}
+}
+
+func TestNormalizeSearchMode(t *testing.T) {
+	tests := []struct {
+		target string
+		want   string
+	}{
+		{"/search?q=graph", "search"},
+		{"/search?q=graph&mode=quick", "quick"},
+		{"/search?q=graph&mode=keyword", "quick"},
+		{"/search?q=graph&mode=deep", "deep"},
+		{"/search?q=graph&mode=full-paper", "deep"},
+		{"/search?q=graph&mode=semantic", "search"},
+		{"/search?q=graph&search-mode=semantic", "search"},
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest("GET", tt.target, nil)
+		if got := normalizeSearchMode(req); got != tt.want {
+			t.Fatalf("normalizeSearchMode(%q) = %q, want %q", tt.target, got, tt.want)
 		}
 	}
 }

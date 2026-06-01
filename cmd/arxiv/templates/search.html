@@ -10,25 +10,43 @@
 <div class="search-container semantic-tooltip-open">
 	<form class="search-bar" action="/search" method="get" id="search-form" role="search">
 		<input type="text" name="q" id="search-input" class="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off" aria-label="Search papers">
+		<input type="hidden" name="mode" value="{{if .SearchMode}}{{.SearchMode}}{{else}}search{{end}}">
 		<div class="search-buttons">
-				<button type="submit" class="search-btn search-btn-keyword" id="btn-keyword" title="Keyword search looks for exact words in titles and abstracts.">
-				<span class="btn-icon">🔍</span><span>Keyword</span>
+			<button type="button" class="search-btn search-btn-keyword" id="btn-quick" title="Quick Search matches words, IDs, authors, and categories.">
+				<span class="btn-icon">⚡</span><span>Quick</span>
 			</button>
-			<button type="button" class="search-btn search-btn-semantic" id="btn-semantic" aria-describedby="semantic-search-tooltip" aria-label="Idea search: describe what you need and find related papers">
-					<span class="btn-icon">🧠</span><span>Idea</span>
+			<button type="submit" class="search-btn search-btn-semantic" id="btn-semantic" aria-describedby="semantic-search-tooltip" aria-label="Search by idea across paper titles and abstracts">
+				<span class="btn-icon">🔎</span><span>Search</span>
+			</button>
+			<button type="button" class="search-btn search-btn-deep" id="btn-deep" title="Deep Search reads full paper text where available. Sign in; free while we test.">
+				<span class="btn-icon">◎</span><span>Deep</span>
 			</button>
 		</div>
 	</form>
-	<div class="semantic-search-tooltip is-visible" id="semantic-search-tooltip" role="tooltip" data-semantic-tooltip>Describe the idea, method, or problem in plain English. We'll find papers about the same thing, even when authors use different words.</div>
+	<div class="semantic-search-tooltip is-visible" id="semantic-search-tooltip" role="tooltip" data-semantic-tooltip>Search is for ideas, methods, and problems across paper abstracts. Use Quick for exact words or IDs. Use Deep for full-paper text when available.</div>
 </div>
 
 <p id="search-status"></p>
 <div id="paper-results">
-{{if .IsSemantic}}
+{{if .IsDeep}}
+{{range .DeepResults}}
+	<div class="paper">
+		<span class="paper-id helpable" tabindex="0" data-help="arXiv identifier. Paste this into search to jump straight here.">{{.PaperID}}</span>
+		<span class="badge badge-similarity helpable" tabindex="0" data-help="How closely this paper matches your deep search.">{{printf "%.0f" (.Similarity | mul 100)}}% match</span>
+		<div class="paper-title" data-mathjax><a href="{{paperPath .PaperID}}">{{.Paper.Title}}</a></div>
+		{{$authors := limitAuthors .Paper.Authors 12}}
+		<div class="paper-authors">{{range $i, $a := $authors.Names}}{{if $i}}, {{end}}<a href="{{authorPath $a}}">{{$a}}</a>{{end}}{{if $authors.Extra}} <span class="more-authors">+{{$authors.Extra}} more</span>{{end}}</div>
+		<div class="paper-categories">{{range $i, $c := parseCategories .Paper.Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
+		{{if .Snippet}}<div class="paper-abstract">{{.Snippet}}</div>{{end}}
+	</div>
+{{else}}
+	<p>No deep-search results found.</p>
+{{end}}
+{{else if .IsSemantic}}
 {{if .NoEmbeddings}}
 <div class="empty-state">
-	<h3>Idea search is warming up</h3>
-	<p>The catalog needs to be prepared before it can find related papers by concept.</p>
+	<h3>Search is warming up</h3>
+	<p>The abstract search catalog is still being prepared. Quick Search is available now.</p>
 	<div class="embedding-actions">
 		<div class="action-buttons">
 				<button class="btn btn-secondary" id="generate-embeddings-btn" data-help="Prepare the paper catalog for idea search and related-work recommendations.">Prepare Catalog</button>
@@ -48,7 +66,7 @@
 			<div class="paper-categories">{{range $i, $c := parseCategories .Paper.Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
 	</div>
 {{else}}
-	<p>No idea-search results found.</p>
+	<p>No search results found.</p>
 {{end}}
 {{end}}
 {{else}}
@@ -119,9 +137,10 @@
 	let activeEventSource = null;
 
 	const initialQuery = '{{.Query}}';
-			const initialMode = '{{if .IsSemantic}}idea{{else}}keyword{{end}}';
-		const initialCount = {{if .IsSemantic}}{{len .SemanticResults}}{{else}}{{len .Papers}}{{end}};
-		const authorDisplayLimit = 12;
+	const initialMode = '{{if .IsDeep}}deep{{else if .IsSemantic}}search{{else}}quick{{end}}';
+	const initialCount = {{if .IsDeep}}{{len .DeepResults}}{{else if .IsSemantic}}{{len .SemanticResults}}{{else}}{{len .Papers}}{{end}};
+	const authorDisplayLimit = 12;
+	const isSignedIn = {{if .CurrentUser}}true{{else}}false{{end}};
 
 	if (initialQuery && initialCount > 0) {
 		statusEl.textContent = initialCount + ' ' + initialMode + ' results for "' + initialQuery + '"';
@@ -148,7 +167,7 @@
 			return links + (extra > 0 ? ' <span class="more-authors">+' + extra + ' more</span>' : '');
 		}
 
-	function renderPaper(p, similarity) {
+	function renderPaper(p, similarity, snippet) {
 		const id = p.ID || p.id;
 		const title = p.Title || p.title || '';
 		const authors = p.Authors || p.authors || '';
@@ -157,28 +176,36 @@
 				const cats = categories.split(' ').filter(c => c).map(c =>
 					'<a class="cat-link" href="/category/' + encodeURIComponent(c) + '" data-help="Open this arXiv subject area.">' + escapeHtml(c) + '</a>').join(' ');
 			const badges = hasEmbed ? '<span class="badge badge-embed helpable" tabindex="0" data-help="This paper is ready for idea search and related-work maps.">🧠</span>' : '';
-				const simBadge = similarity ? '<span class="badge badge-similarity helpable" tabindex="0" data-help="How closely this paper matches the idea you searched for.">' + Math.round(similarity * 100) + '%</span>' : '';
+				const simBadge = similarity ? '<span class="badge badge-similarity helpable" tabindex="0" data-help="How closely this paper matches your search.">' + Math.round(similarity * 100) + '%</span>' : '';
+			const snippetHtml = snippet ? '<div class="paper-abstract">' + escapeHtml(snippet) + '</div>' : '';
 			return '<div class="paper"><span class="paper-id helpable" tabindex="0" data-help="arXiv identifier. Paste this into search to jump straight here.">' + id + '</span> ' + badges + ' ' + simBadge +
 			'<div class="paper-title" data-mathjax><a href="' + encodeURI('/abs/' + id) + '">' + escapeHtml(title) + '</a></div>' +
-			'<div class="paper-authors">' + renderAuthors(authors) + '</div><div class="paper-categories">' + cats + '</div></div>';
+			'<div class="paper-authors">' + renderAuthors(authors) + '</div><div class="paper-categories">' + cats + '</div>' + snippetHtml + '</div>';
 	}
 
-	function doStreamSearch(query, isSemantic) {
+	function doStreamSearch(query, mode) {
+		const isSemantic = mode !== 'quick';
+		const isDeep = mode === 'deep';
 		if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
 		statusEl.style.color = '';
+
+		if (isDeep && !isSignedIn) {
+			window.location.href = '/login?next=' + encodeURIComponent('/search?q=' + query + '&mode=deep');
+			return;
+		}
 
 		let terminalEl = document.getElementById('search-terminal');
 		if (isSemantic) {
 			if (!terminalEl) {
 				paperContainer.insertAdjacentHTML('beforebegin', '<div class="terminal active" id="search-terminal">' +
 					'<div class="terminal-header"><span class="terminal-dot red"></span><span class="terminal-dot yellow"></span>' +
-						'<span class="terminal-dot green"></span><span class="terminal-title">idea search</span></div>' +
-							'<div class="terminal-body"><div class="terminal-line prompt">search idea "' + escapeHtml(query) + '"</div>' +
-						'<div class="terminal-line info" id="terminal-status">Understanding the idea...<span class="terminal-cursor"></span></div></div></div>');
+						'<span class="terminal-dot green"></span><span class="terminal-title">' + (isDeep ? 'deep search' : 'search') + '</span></div>' +
+							'<div class="terminal-body"><div class="terminal-line prompt">' + (isDeep ? 'deep search ' : 'search ') + '"' + escapeHtml(query) + '"</div>' +
+						'<div class="terminal-line info" id="terminal-status">' + (isDeep ? 'Reading full papers...' : 'Understanding the idea...') + '<span class="terminal-cursor"></span></div></div></div>');
 				terminalEl = document.getElementById('search-terminal');
 			} else {
 				terminalEl.classList.add('active');
-					document.getElementById('terminal-status').innerHTML = 'Understanding the idea...<span class="terminal-cursor"></span>';
+					document.getElementById('terminal-status').innerHTML = (isDeep ? 'Reading full papers...' : 'Understanding the idea...') + '<span class="terminal-cursor"></span>';
 			}
 			statusEl.style.display = 'none';
 		} else {
@@ -189,7 +216,7 @@
 		paperContainer.innerHTML = '';
 
 		const params = new URLSearchParams({ q: query, limit: '100' });
-		if (isSemantic) params.append('mode', 'semantic');
+		params.append('mode', mode);
 
 		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
 		let resultCount = 0;
@@ -210,14 +237,14 @@
 					resultCount++;
 					if (terminalEl) terminalEl.classList.remove('active');
 					statusEl.style.display = '';
-					paperContainer.insertAdjacentHTML('beforeend', renderPaper(data.paper, data.similarity));
+					paperContainer.insertAdjacentHTML('beforeend', renderPaper(data.paper, data.similarity, data.snippet));
 					if (window.typesetMath) window.typesetMath(paperContainer.lastElementChild);
 					statusEl.textContent = resultCount + ' results...';
 					break;
 				case 'complete':
 					if (terminalEl) terminalEl.classList.remove('active');
 					statusEl.style.display = '';
-						statusEl.textContent = data.count + ' ' + (data.mode === 'semantic' ? 'idea' : 'keyword') + ' results for "' + escapeHtml(query) + '"';
+						statusEl.textContent = data.count + ' ' + modeLabel(data.mode) + ' results for "' + escapeHtml(query) + '"';
 					activeEventSource.close(); activeEventSource = null;
 					break;
 				case 'error':
@@ -235,20 +262,42 @@
 		};
 	}
 
+	function modeLabel(mode) {
+		if (mode === 'deep') return 'deep';
+		if (mode === 'quick') return 'quick';
+		return 'search';
+	}
+
 	form.addEventListener('submit', function(e) {
 		e.preventDefault();
 		const query = input.value.trim();
 		if (query) {
 			history.pushState(null, '', '/search?q=' + encodeURIComponent(query));
-			doStreamSearch(query, false);
+			doStreamSearch(query, 'search');
+		}
+	});
+
+	document.getElementById('btn-quick').addEventListener('click', function() {
+		const query = input.value.trim();
+		if (query) {
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=quick');
+			doStreamSearch(query, 'quick');
 		}
 	});
 
 	btnSemantic.addEventListener('click', function() {
 		const query = input.value.trim();
 		if (query) {
-			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=semantic');
-			doStreamSearch(query, true);
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=search');
+			doStreamSearch(query, 'search');
+		}
+	});
+
+	document.getElementById('btn-deep').addEventListener('click', function() {
+		const query = input.value.trim();
+		if (query) {
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=deep');
+			doStreamSearch(query, 'deep');
 		}
 	});
 

@@ -16,6 +16,15 @@ type SemanticResult struct {
 	Paper      *Paper  `json:"paper,omitempty"`
 }
 
+type DeepSearchResult struct {
+	PaperID    string  `json:"paperId"`
+	Similarity float64 `json:"similarity"`
+	ChunkID    string  `json:"chunkId"`
+	Section    string  `json:"section,omitempty"`
+	Snippet    string  `json:"snippet,omitempty"`
+	Paper      *Paper  `json:"paper,omitempty"`
+}
+
 type SemanticMap struct {
 	Points     []SemanticMapPoint `json:"points"`
 	Links      []SemanticMapLink  `json:"links"`
@@ -112,6 +121,136 @@ func (c *Cache) SearchSemantic(ctx context.Context, queryEmbedding []float32, li
 	return c.attachPaperDetails(ctx, results), nil
 }
 
+// SearchSemanticQwen performs abstract-level semantic search over Qwen vectors.
+func (c *Cache) SearchSemanticQwen(ctx context.Context, queryEmbedding []float32, limit int) ([]SemanticResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if c.dbType != DBTypePostgres {
+		return nil, fmt.Errorf("qwen semantic search requires PostgreSQL with pgvector")
+	}
+
+	vecStr := float32SliceToVectorString(queryEmbedding)
+	query := `
+		SELECT paper_id, 1 - (vector <=> $1::vector) as similarity
+		FROM embeddings_v2
+		WHERE scope = 'abstract'
+		  AND model = $2
+		  AND dim = $3
+		  AND vector IS NOT NULL
+		ORDER BY vector <=> $1::vector
+		LIMIT $4
+	`
+
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := sqlDB.QueryContext(ctx, query, vecStr, qwenEmbeddingModel, qwenEmbeddingDim, limit)
+	if err != nil {
+		return nil, fmt.Errorf("qwen semantic search query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SemanticResult
+	for rows.Next() {
+		var r SemanticResult
+		if err := rows.Scan(&r.PaperID, &r.Similarity); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return c.attachPaperDetails(ctx, results), nil
+}
+
+// SearchDeepQwen searches full-paper chunks and returns one best chunk per paper.
+func (c *Cache) SearchDeepQwen(ctx context.Context, queryEmbedding []float32, limit int) ([]DeepSearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if c.dbType != DBTypePostgres {
+		return nil, fmt.Errorf("deep search requires PostgreSQL with pgvector")
+	}
+
+	vecStr := float32SliceToVectorString(queryEmbedding)
+	candidateLimit := limit * 8
+	if candidateLimit < 80 {
+		candidateLimit = 80
+	}
+	query := `
+		WITH nearest AS (
+			SELECT c.paper_id,
+			       c.id AS chunk_id,
+			       c.section,
+			       left(regexp_replace(c.text, '[[:space:]]+', ' ', 'g'), 520) AS snippet,
+			       e.vector <=> $1::vector AS distance,
+			       1 - (e.vector <=> $1::vector) AS similarity
+			FROM chunk_embeddings_v2 e
+			JOIN paper_chunks c ON c.id = e.chunk_id
+			WHERE c.scope = 'pdf_text'
+			  AND e.model = $2
+			  AND e.dim = $3
+			  AND e.vector IS NOT NULL
+			  AND COALESCE(c.text, '') <> ''
+			ORDER BY e.vector <=> $1::vector
+			LIMIT $4
+		),
+		ranked AS (
+			SELECT *,
+			       row_number() OVER (PARTITION BY paper_id ORDER BY distance) AS rn
+			FROM nearest
+		)
+		SELECT paper_id, similarity, chunk_id, COALESCE(section, ''), COALESCE(snippet, '')
+		FROM ranked
+		WHERE rn = 1
+		ORDER BY distance
+		LIMIT $5
+	`
+
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := sqlDB.QueryContext(ctx, query, vecStr, qwenEmbeddingModel, qwenEmbeddingDim, candidateLimit, limit)
+	if err != nil {
+		return nil, fmt.Errorf("deep search query failed: %w", err)
+	}
+	defer rows.Close()
+
+	results := []DeepSearchResult{}
+	ids := []string{}
+	for rows.Next() {
+		var r DeepSearchResult
+		if err := rows.Scan(&r.PaperID, &r.Similarity, &r.ChunkID, &r.Section, &r.Snippet); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+		ids = append(ids, r.PaperID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if papers, err := c.GetPapersByIDs(ctx, ids); err == nil {
+		paperMap := make(map[string]*Paper, len(papers))
+		for _, paper := range papers {
+			p := paper
+			paperMap[paper.ID] = &p
+		}
+		for i := range results {
+			results[i].Paper = paperMap[results[i].PaperID]
+		}
+	}
+
+	return results, nil
+}
+
 // SimilarPaperMap returns a true embedding-space map around a paper.
 func (c *Cache) SimilarPaperMap(ctx context.Context, paperID string, limit int) (*SemanticMap, []SemanticResult, error) {
 	if limit <= 0 {
@@ -180,6 +319,118 @@ func (c *Cache) SimilarPaperMap(ctx context.Context, paperID string, limit int) 
 	}
 	if len(vectorRows) == 0 {
 		return nil, nil, fmt.Errorf("paper embedding not found")
+	}
+
+	sort.SliceStable(vectorRows, func(i, j int) bool {
+		if vectorRows[i].Anchor != vectorRows[j].Anchor {
+			return vectorRows[i].Anchor
+		}
+		return vectorRows[i].Similarity > vectorRows[j].Similarity
+	})
+
+	results := make([]SemanticResult, 0, len(vectorRows)-1)
+	ids := make([]string, 0, len(vectorRows))
+	for _, row := range vectorRows {
+		ids = append(ids, row.PaperID)
+		if !row.Anchor {
+			results = append(results, SemanticResult{
+				PaperID:    row.PaperID,
+				Similarity: row.Similarity,
+			})
+		}
+	}
+
+	paperMap := map[string]*Paper{}
+	if papers, err := c.GetPapersByIDs(ctx, ids); err == nil {
+		for _, paper := range papers {
+			p := paper
+			paperMap[paper.ID] = &p
+		}
+	}
+
+	for i := range results {
+		if paper, ok := paperMap[results[i].PaperID]; ok {
+			results[i].Paper = paper
+		}
+	}
+
+	return buildSemanticMap(vectorRows, paperMap), results, nil
+}
+
+// SimilarPaperMapQwen returns a related-work map from Qwen abstract embeddings.
+func (c *Cache) SimilarPaperMapQwen(ctx context.Context, paperID string, limit int) (*SemanticMap, []SemanticResult, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+	if c.dbType != DBTypePostgres {
+		return nil, nil, fmt.Errorf("similar paper maps require PostgreSQL with pgvector")
+	}
+
+	query := `
+		WITH anchor AS (
+			SELECT paper_id, vector
+			FROM embeddings_v2
+			WHERE paper_id = $1
+			  AND scope = 'abstract'
+			  AND model = $2
+			  AND dim = $3
+			  AND vector IS NOT NULL
+			LIMIT 1
+		),
+		neighbors AS (
+			SELECT e.paper_id,
+			       1 - (e.vector <=> a.vector) AS similarity,
+			       e.vector::text AS vector_text,
+			       false AS is_anchor
+			FROM embeddings_v2 e
+			CROSS JOIN anchor a
+			WHERE e.paper_id <> $1
+			  AND e.scope = 'abstract'
+			  AND e.model = $2
+			  AND e.dim = $3
+			  AND e.vector IS NOT NULL
+			ORDER BY e.vector <=> a.vector
+			LIMIT $4
+		)
+		SELECT paper_id, similarity, vector_text, is_anchor
+		FROM (
+			SELECT paper_id, 1.0::double precision AS similarity, vector::text AS vector_text, true AS is_anchor
+			FROM anchor
+			UNION ALL
+			SELECT paper_id, similarity, vector_text, is_anchor
+			FROM neighbors
+		) mapped
+	`
+
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := sqlDB.QueryContext(ctx, query, paperID, qwenEmbeddingModel, qwenEmbeddingDim, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("qwen similar paper map query failed: %w", err)
+	}
+	defer rows.Close()
+
+	vectorRows := []semanticVectorRow{}
+	for rows.Next() {
+		var r semanticVectorRow
+		var vectorText string
+		if err := rows.Scan(&r.PaperID, &r.Similarity, &vectorText, &r.Anchor); err != nil {
+			return nil, nil, err
+		}
+		r.Vector, err = parsePgVectorText(vectorText)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse vector for %s: %w", r.PaperID, err)
+		}
+		vectorRows = append(vectorRows, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(vectorRows) == 0 {
+		return nil, nil, fmt.Errorf("paper qwen embedding not found")
 	}
 
 	sort.SliceStable(vectorRows, func(i, j int) bool {
