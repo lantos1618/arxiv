@@ -37,6 +37,9 @@
 		<div class="admin-metric"><div class="admin-metric-label">Active 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Active7d}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Free</div><div class="admin-metric-value">{{formatInt .Stats.Users.FreeUsers}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Paper views</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaperViews}}</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Viewers 24h</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers24h}}</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Viewers 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers7d}}</div></div>
 	</div>
 </div>
 
@@ -62,8 +65,30 @@
 			<tr><td colspan="8">No users yet.</td></tr>
 			{{end}}
 			<tr class="placeholder-row">
-				<td colspan="8">PLACEHOLDER: per-user search counts, saved searches, billing status, and feature usage are not tracked yet.</td>
+				<td colspan="8">PLACEHOLDER: search counts, saved searches, billing status, and feature usage are not tracked yet.</td>
 			</tr>
+		</tbody>
+	</table>
+</div>
+
+<div class="admin-section">
+	<h2>Recent Paper Views</h2>
+	<table class="admin-table">
+		<thead>
+			<tr><th>User</th><th>Paper</th><th>Categories</th><th>Views</th><th>Last viewed</th></tr>
+		</thead>
+		<tbody>
+			{{range .Stats.RecentViews}}
+			<tr>
+				<td>{{if .UserEmail}}{{.UserEmail}}{{else}}{{.UserID}}{{end}}{{if .UserName}}<br><span>{{.UserName}}</span>{{end}}</td>
+				<td><a href="{{paperPath .PaperID}}">{{if .PaperTitle}}{{.PaperTitle}}{{else}}{{.PaperID}}{{end}}</a><br><code>{{.PaperID}}</code></td>
+				<td>{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}">{{$c}}</a>{{end}}</td>
+				<td>{{.ViewCount}}</td>
+				<td>{{timeStamp .LastViewedAt}}</td>
+			</tr>
+			{{else}}
+			<tr><td colspan="5">No signed-in paper views yet.</td></tr>
+			{{end}}
 		</tbody>
 	</table>
 </div>
