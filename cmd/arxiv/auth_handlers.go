@@ -205,10 +205,23 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		log.Printf("account recent views failed: %v", err)
 		views = []arxiv.UserPaperViewRow{}
 	}
+	peerViews, err := s.cache.ReadersLikeYouViews(r.Context(), user.ID, 12)
+	if err != nil {
+		log.Printf("account readers-like-you failed: %v", err)
+		peerViews = []arxiv.UserPaperViewRow{}
+	}
+	if len(peerViews) == 0 {
+		peerViews, err = s.cache.RecentCommunityPaperViews(r.Context(), 12)
+		if err != nil {
+			log.Printf("account community views failed: %v", err)
+			peerViews = []arxiv.UserPaperViewRow{}
+		}
+	}
 	s.renderTemplate(w, r, "account", map[string]any{
 		"Title":       "Account",
 		"User":        user,
 		"RecentViews": views,
+		"PeerViews":   peerViews,
 	})
 }
 

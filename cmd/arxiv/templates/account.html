@@ -43,6 +43,25 @@
 <p>No signed-in paper views yet.</p>
 {{end}}
 
+<h2>Readers Like You</h2>
+{{if .PeerViews}}
+<table class="account-table">
+	<thead><tr><th>Paper</th><th>Categories</th><th>Readers</th><th>Views</th></tr></thead>
+	<tbody>
+		{{range .PeerViews}}
+		<tr>
+			<td><a href="{{paperPath .PaperID}}">{{if .PaperTitle}}{{.PaperTitle}}{{else}}{{.PaperID}}{{end}}</a><br><code>{{.PaperID}}</code></td>
+			<td>{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}">{{$c}}</a>{{end}}</td>
+			<td>{{.ReaderCount}}</td>
+			<td>{{.ViewCount}}</td>
+		</tr>
+		{{end}}
+	</tbody>
+</table>
+{{else}}
+<p>No community reading signal yet.</p>
+{{end}}
+
 <form method="post" action="/logout">
 	<button class="btn btn-secondary" type="submit">Sign out</button>
 </form>

@@ -1113,6 +1113,15 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 		currentUser = user
 		s.recordPaperView(user.ID, paper.ID)
 	}
+	excludeUserID := ""
+	if currentUser != nil {
+		excludeUserID = currentUser.ID
+	}
+	alsoViewed, err := s.cache.PaperAlsoViewed(ctx, paper.ID, excludeUserID, 10)
+	if err != nil {
+		log.Printf("paper also-viewed failed: %v", err)
+		alsoViewed = []arxiv.UserPaperViewRow{}
+	}
 
 	hasEmbedding := s.cache.HasQwenEmbedding(ctx, id)
 
@@ -1129,6 +1138,7 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 		"FetchingSource": fetchingSource,
 		"HasEmbedding":   hasEmbedding,
 		"LocalMode":      s.localMode,
+		"AlsoViewed":     alsoViewed,
 	}
 	if currentUser != nil {
 		data["CurrentUser"] = currentUser
