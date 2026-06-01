@@ -245,6 +245,8 @@ func responseCacheKey(r *http.Request) (string, bool) {
 		path == "/categories" ||
 		path == "/api/v1/categories" ||
 		path == "/robots.txt" ||
+		path == "/security.txt" ||
+		path == "/.well-known/security.txt" ||
 		path == "/sitemap.xml" ||
 		path == "/sitemap-static.xml" ||
 		path == "/BingSiteAuth.xml" ||
