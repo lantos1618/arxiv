@@ -192,6 +192,8 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/src/", srv.handleSource)
 	mux.HandleFunc("/pdf/", srv.handlePDF)
 	mux.HandleFunc("/robots.txt", srv.handleRobots)
+	mux.HandleFunc("/security.txt", srv.handleSecurityTXT)
+	mux.HandleFunc("/.well-known/security.txt", srv.handleSecurityTXT)
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 	mux.HandleFunc("/sitemap-static.xml", srv.handleStaticSitemap)
 	mux.HandleFunc("/sitemaps/", srv.handlePaperSitemap)
@@ -1368,6 +1370,25 @@ func (s *server) handleRobots(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodHead {
 		fmt.Fprintf(w, "User-agent: *\nDisallow:\n\nSitemap: %s/sitemap.xml\n", arxiv.SiteBaseURL())
 	}
+}
+
+// handleSecurityTXT serves the security contact policy used by scanners and
+// researchers. RFC 9116 prefers /.well-known/security.txt; /security.txt is a
+// convenience alias.
+func (s *server) handleSecurityTXT(w http.ResponseWriter, r *http.Request) {
+	if rejectNonGetHead(w, r) {
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if r.Method == http.MethodHead {
+		return
+	}
+	fmt.Fprintf(w, "Contact: mailto:lyndon@lambda.run\n")
+	fmt.Fprintf(w, "Expires: 2027-06-01T00:00:00Z\n")
+	fmt.Fprintf(w, "Preferred-Languages: en\n")
+	fmt.Fprintf(w, "Canonical: %s/.well-known/security.txt\n", arxiv.SiteBaseURL())
 }
 
 // handleBingSiteAuth serves the Bing Webmaster Tools verification file.
