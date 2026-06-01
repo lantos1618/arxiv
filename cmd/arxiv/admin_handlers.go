@@ -124,13 +124,13 @@ func simplePlanModel() []adminPlanView {
 		{
 			Plan:    "anon",
 			Who:     "Visitor without login",
-			Access:  "Browse, keyword search, abstract semantic search, public paper pages.",
+			Access:  "Browse, Quick Search, Qwen abstract Search, public paper pages.",
 			Billing: "No user row and no billing record.",
 		},
 		{
 			Plan:    "free",
 			Who:     "Signed in with Google",
-			Access:  "Saved account identity plus full-body search while it is free during testing.",
+			Access:  "Saved account identity plus Deep Search over full-paper chunks while it is free during testing.",
 			Billing: "Real plan value on users.plan. No payment required.",
 		},
 		{

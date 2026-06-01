@@ -20,8 +20,8 @@ type AdminStats struct {
 }
 
 const (
-	adminQwenModel = "Qwen/Qwen3-Embedding-8B"
-	adminQwenDim   = 1024
+	adminQwenModel = qwenEmbeddingModel
+	adminQwenDim   = qwenEmbeddingDim
 	adminStatsTTL  = time.Minute
 )
 

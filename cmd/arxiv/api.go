@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -231,8 +232,7 @@ func (s *server) handleAPISearchSemantic(w http.ResponseWriter, r *http.Request)
 
 	ctx := r.Context()
 
-	// Check if embeddings exist
-	count, err := s.cache.CountEmbeddings(ctx)
+	stats, err := s.cache.Stats(ctx)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -241,26 +241,24 @@ func (s *server) handleAPISearchSemantic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if count == 0 {
+	if stats.QwenEmbeddingsCount == 0 {
 		respondJSON(w, http.StatusServiceUnavailable, APIResponse{
 			Success: false,
-			Error:   "semantic search requires embeddings to be generated first. Run tools/generate_embeddings.py",
+			Error:   "Search is warming up. Try Quick Search for now.",
 		})
 		return
 	}
 
-	// Generate query embedding using Python script
-	queryEmbedding, err := s.generateQueryEmbedding(ctx, query)
+	queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 	if err != nil {
 		respondJSON(w, http.StatusServiceUnavailable, APIResponse{
 			Success: false,
-			Error:   "failed to generate query embedding: " + err.Error(),
+			Error:   "failed to understand query: " + err.Error(),
 		})
 		return
 	}
 
-	// Perform semantic search
-	results, err := s.cache.SearchSemantic(ctx, queryEmbedding, limit)
+	results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, limit)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -275,6 +273,8 @@ func (s *server) handleAPISearchSemantic(w http.ResponseWriter, r *http.Request)
 			"results": results,
 			"count":   len(results),
 			"query":   query,
+			"mode":    "search",
+			"model":   "Qwen3-Embedding-8B",
 		},
 	})
 }
@@ -315,15 +315,15 @@ func (s *server) handleAPISimilarPapers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if !s.cache.HasEmbedding(ctx, paperID) {
+	if !s.cache.HasQwenEmbedding(ctx, paperID) {
 		respondJSON(w, http.StatusConflict, APIResponse{
 			Success: false,
-			Error:   "paper embedding not found",
+			Error:   "paper qwen embedding not found",
 		})
 		return
 	}
 
-	semanticMap, results, err := s.cache.SimilarPaperMap(ctx, paperID, limit)
+	semanticMap, results, err := s.cache.SimilarPaperMapQwen(ctx, paperID, limit)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -339,7 +339,7 @@ func (s *server) handleAPISimilarPapers(w http.ResponseWriter, r *http.Request) 
 			"results": summarizeSimilarResults(results),
 			"map":     semanticMap,
 			"count":   len(results),
-			"model":   "all-MiniLM-L6-v2",
+			"model":   "Qwen3-Embedding-8B",
 		},
 	})
 }
@@ -460,8 +460,7 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	searchMode := r.URL.Query().Get("mode")
-	isSemantic := searchMode == "semantic"
+	searchMode := normalizeSearchMode(r)
 
 	setSSEHeaders(w)
 
@@ -481,12 +480,23 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 	}))
 	flusher.Flush()
 
-	if isSemantic {
-		count, err := s.cache.CountEmbeddings(ctx)
-		if err != nil || count == 0 {
+	if searchMode == "search" || searchMode == "deep" {
+		if searchMode == "deep" {
+			if _, ok := s.currentUser(r); !ok {
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":  "error",
+					"error": "Sign in to use Deep Search. It is free while we test full-paper tools.",
+				}))
+				flusher.Flush()
+				return
+			}
+		}
+
+		stats, err := s.cache.Stats(ctx)
+		if err != nil || stats.QwenEmbeddingsCount == 0 {
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 				"type":  "error",
-				"error": "Semantic search requires embeddings. Generate them first.",
+				"error": "Search is warming up. Try Quick Search for now.",
 			}))
 			flusher.Flush()
 			return
@@ -494,15 +504,15 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 			"type":    "status",
-			"message": "Generating query embedding...",
+			"message": searchModeProgressMessage(searchMode),
 		}))
 		flusher.Flush()
 
-		queryEmbedding, err := s.generateQueryEmbedding(ctx, query)
+		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 				"type":  "error",
-				"error": "Failed to generate query embedding: " + err.Error(),
+				"error": "Failed to understand query: " + err.Error(),
 			}))
 			flusher.Flush()
 			return
@@ -514,38 +524,71 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		}))
 		flusher.Flush()
 
-		results, err := s.cache.SearchSemantic(ctx, queryEmbedding, limit)
-		if err != nil {
-			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "error",
-				"error": err.Error(),
-			}))
-			flusher.Flush()
-			return
-		}
-
-		for i, res := range results {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+		if searchMode == "deep" {
+			results, err := s.cache.SearchDeepQwen(ctx, queryEmbedding, limit)
+			if err != nil {
 				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-					"type":       "result",
-					"index":      i,
-					"paper":      res.Paper,
-					"paperId":    res.PaperID,
-					"similarity": res.Similarity,
+					"type":  "error",
+					"error": err.Error(),
 				}))
 				flusher.Flush()
+				return
 			}
+			for i, res := range results {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+						"type":       "result",
+						"index":      i,
+						"paper":      res.Paper,
+						"paperId":    res.PaperID,
+						"similarity": res.Similarity,
+						"snippet":    res.Snippet,
+						"section":    res.Section,
+					}))
+					flusher.Flush()
+				}
+			}
+			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+				"type":  "complete",
+				"count": len(results),
+				"mode":  "deep",
+			}))
+			flusher.Flush()
+		} else {
+			results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, limit)
+			if err != nil {
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":  "error",
+					"error": err.Error(),
+				}))
+				flusher.Flush()
+				return
+			}
+			for i, res := range results {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+						"type":       "result",
+						"index":      i,
+						"paper":      res.Paper,
+						"paperId":    res.PaperID,
+						"similarity": res.Similarity,
+					}))
+					flusher.Flush()
+				}
+			}
+			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+				"type":  "complete",
+				"count": len(results),
+				"mode":  "search",
+			}))
+			flusher.Flush()
 		}
-
-		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "complete",
-			"count": len(results),
-			"mode":  "semantic",
-		}))
-		flusher.Flush()
 
 	} else {
 		papers, err := s.cache.Search(ctx, query, category, limit)
@@ -576,10 +619,32 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 			"type":  "complete",
 			"count": len(papers),
-			"mode":  "keyword",
+			"mode":  "quick",
 		}))
 		flusher.Flush()
 	}
+}
+
+func normalizeSearchMode(r *http.Request) string {
+	raw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search-mode")))
+	}
+	switch raw {
+	case "quick", "keyword", "normal":
+		return "quick"
+	case "deep", "full", "full-paper", "fullpaper":
+		return "deep"
+	default:
+		return "search"
+	}
+}
+
+func searchModeProgressMessage(mode string) string {
+	if mode == "deep" {
+		return "Reading full-paper matches..."
+	}
+	return "Understanding the idea..."
 }
 
 // handleAPICitations returns citations for a paper
@@ -738,6 +803,7 @@ func (s *server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 		"SourcesDownloaded":            stats.SourcesDownloaded,
 		"QueuedDownloads":              stats.QueuedDownloads,
 		"EmbeddingsCount":              stats.EmbeddingsCount,
+		"QwenEmbeddingsCount":          stats.QwenEmbeddingsCount,
 		"SSEConnections":               s.paperBroadcast.Count(),
 		"OfficialArxivPapers":          coverage.OfficialTotal,
 		"OfficialArxivPapersAsOf":      coverage.AsOf,
@@ -800,7 +866,7 @@ func (s *server) handleAPIFetch(w http.ResponseWriter, r *http.Request) {
 	// Broadcast new paper to all SSE subscribers
 	s.paperBroadcast.Broadcast(paperEvent{
 		Paper:        *paper,
-		HasEmbedding: s.cache.HasEmbedding(ctx, paper.ID),
+		HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 	})
 
 	if generateEmbedding {
@@ -1002,6 +1068,13 @@ func (s *server) handleAPIEmbeddings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) generatePaperEmbedding(ctx context.Context, paper *arxiv.Paper) (string, error) {
+	if strings.TrimSpace(s.qwenEmbeddingServiceURL) != "" {
+		if err := s.generatePaperQwenEmbedding(ctx, paper); err != nil {
+			return "", err
+		}
+		return "qwen-service", nil
+	}
+
 	if s.embeddingServiceURL != "" {
 		if err := s.generatePaperEmbeddingHTTP(ctx, paper); err == nil {
 			return "embedding-service", nil
@@ -1014,6 +1087,28 @@ func (s *server) generatePaperEmbedding(ctx context.Context, paper *arxiv.Paper)
 		return "", err
 	}
 	return "python-script", nil
+}
+
+func (s *server) generatePaperQwenEmbedding(ctx context.Context, paper *arxiv.Paper) error {
+	text := qwenPaperText(paper)
+	if text == "" {
+		return fmt.Errorf("paper has no title or abstract to embed")
+	}
+	embedding, err := s.generateQwenQueryEmbedding(ctx, text)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(text))
+	return s.cache.StoreQwenAbstractEmbedding(ctx, paper.ID, fmt.Sprintf("%x", sum[:]), len(text), max(1, len(text)/4), embedding)
+}
+
+func qwenPaperText(paper *arxiv.Paper) string {
+	title := strings.TrimSpace(paper.Title)
+	abstract := strings.Join(strings.Fields(paper.Abstract), " ")
+	if title != "" && abstract != "" {
+		return title + ". " + abstract
+	}
+	return title + abstract
 }
 
 func (s *server) generatePaperEmbeddingHTTP(ctx context.Context, paper *arxiv.Paper) error {
@@ -1333,6 +1428,53 @@ func (s *server) generateQueryEmbedding(ctx context.Context, query string) ([]fl
 	return s.generateQueryEmbeddingPython(ctx, query)
 }
 
+func (s *server) generateQwenQueryEmbedding(ctx context.Context, query string) ([]float32, error) {
+	if strings.TrimSpace(s.qwenEmbeddingServiceURL) == "" {
+		return nil, fmt.Errorf("Qwen search is warming up; try Quick Search for now")
+	}
+
+	reqBody := map[string][]string{"texts": []string{query}}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(s.qwenEmbeddingServiceURL, "/")+"/embed/batch", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Qwen service request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Qwen service error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Embeddings [][]float32 `json:"embeddings"`
+		Dimension  int         `json:"dimension"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode Qwen embedding response: %w", err)
+	}
+	if len(result.Embeddings) != 1 {
+		return nil, fmt.Errorf("Qwen service returned %d embeddings for one query", len(result.Embeddings))
+	}
+	if len(result.Embeddings[0]) != arxiv.QwenEmbeddingDim {
+		return nil, fmt.Errorf("Qwen service returned %d dimensions, want %d", len(result.Embeddings[0]), arxiv.QwenEmbeddingDim)
+	}
+	return result.Embeddings[0], nil
+}
+
 // generateQueryEmbeddingHTTP calls the FastAPI embedding service.
 func (s *server) generateQueryEmbeddingHTTP(ctx context.Context, query string) ([]float32, error) {
 	reqBody := map[string]string{"text": query}
@@ -1486,7 +1628,7 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 	for i, p := range papers {
 		paperIDs[i] = p.ID
 	}
-	embeddingIDs, _ := s.cache.GetEmbeddingIDsFor(ctx, paperIDs)
+	embeddingIDs, _ := s.cache.GetQwenEmbeddingIDsFor(ctx, paperIDs)
 
 	// Release semaphore - DB queries done
 	<-sseInitSemaphore
