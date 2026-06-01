@@ -16,7 +16,7 @@ type UserPaperViewRow struct {
 	PaperID      string
 	PaperTitle   string
 	Categories   string
-	ViewCount    int
+	ViewCount    int64
 	LastViewedAt time.Time
 }
 
