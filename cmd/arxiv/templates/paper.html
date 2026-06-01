@@ -358,6 +358,20 @@
 	<p class="semantic-map-placeholder">{{if .HasEmbedding}}Click Find Similar to map nearby papers.{{else}}Prepare this paper, then map nearby papers.{{end}}</p>
 </div>
 
+{{if .AlsoViewed}}
+<h2>Readers Also Viewed</h2>
+<ul class="refs">
+{{range .AlsoViewed}}
+	<li>
+		<span class="ref-id">{{.PaperID}}</span>
+		<a class="ref-title" href="{{paperPath .PaperID}}" data-mathjax>{{if .PaperTitle}}{{.PaperTitle}}{{else}}{{.PaperID}}{{end}}</a>
+		<span class="ref-meta">{{.ReaderCount}} readers · {{.ViewCount}} views</span>
+		<div class="paper-categories">{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}">{{$c}}</a>{{end}}</div>
+	</li>
+{{end}}
+</ul>
+{{end}}
+
 {{if .PaperList}}
 <h2>References{{if .UncachedCount}} <span class="loading" id="prefetch-status">Loading titles...</span>{{end}}</h2>
 <ul class="refs" id="refs-list">

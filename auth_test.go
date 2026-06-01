@@ -118,3 +118,76 @@ func TestRecordUserPaperView(t *testing.T) {
 		t.Fatalf("unexpected view row: %#v", views[0])
 	}
 }
+
+func TestReaderViewRecommendations(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	cache, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer cache.Close()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	userA, err := cache.FindOrCreateUser(ctx, "reader-a@example.edu", "Reader A", "", true, "google", now)
+	if err != nil {
+		t.Fatalf("FindOrCreateUser A: %v", err)
+	}
+	userB, err := cache.FindOrCreateUser(ctx, "reader-b@example.edu", "Reader B", "", true, "google", now)
+	if err != nil {
+		t.Fatalf("FindOrCreateUser B: %v", err)
+	}
+	userC, err := cache.FindOrCreateUser(ctx, "reader-c@example.edu", "Reader C", "", true, "google", now)
+	if err != nil {
+		t.Fatalf("FindOrCreateUser C: %v", err)
+	}
+	papers := []Paper{
+		{ID: "2601.00001", Created: now, Updated: now, Title: "Anchor Paper", Abstract: "A", Authors: "Ada", Categories: "cs.AI"},
+		{ID: "2601.00002", Created: now, Updated: now, Title: "Peer Paper B", Abstract: "B", Authors: "Ada", Categories: "cs.LG"},
+		{ID: "2601.00003", Created: now, Updated: now, Title: "Peer Paper C", Abstract: "C", Authors: "Ada", Categories: "cs.CL"},
+	}
+	if err := cache.db.WithContext(ctx).Create(&papers).Error; err != nil {
+		t.Fatalf("create papers: %v", err)
+	}
+
+	for _, view := range []struct {
+		userID  string
+		paperID string
+	}{
+		{userA.ID, "2601.00001"},
+		{userB.ID, "2601.00001"},
+		{userB.ID, "2601.00002"},
+		{userC.ID, "2601.00001"},
+		{userC.ID, "2601.00003"},
+	} {
+		if err := cache.RecordUserPaperView(ctx, view.userID, view.paperID); err != nil {
+			t.Fatalf("RecordUserPaperView(%s, %s): %v", view.userID, view.paperID, err)
+		}
+	}
+
+	alsoViewed, err := cache.PaperAlsoViewed(ctx, "2601.00001", "", 10)
+	if err != nil {
+		t.Fatalf("PaperAlsoViewed: %v", err)
+	}
+	if !hasPaperView(alsoViewed, "2601.00002") || !hasPaperView(alsoViewed, "2601.00003") {
+		t.Fatalf("also viewed missing peer papers: %#v", alsoViewed)
+	}
+
+	likeYou, err := cache.ReadersLikeYouViews(ctx, userA.ID, 10)
+	if err != nil {
+		t.Fatalf("ReadersLikeYouViews: %v", err)
+	}
+	if !hasPaperView(likeYou, "2601.00002") || !hasPaperView(likeYou, "2601.00003") {
+		t.Fatalf("readers-like-you missing peer papers: %#v", likeYou)
+	}
+}
+
+func hasPaperView(rows []UserPaperViewRow, paperID string) bool {
+	for _, row := range rows {
+		if row.PaperID == paperID {
+			return true
+		}
+	}
+	return false
+}
