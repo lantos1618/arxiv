@@ -62,7 +62,12 @@
 		<div class="admin-metric">
 			<div class="admin-metric-label">Full-paper texts</div>
 			<div class="admin-metric-value">{{formatInt .Stats.Embeddings.FullPaperTexts}}</div>
-			<div class="admin-metric-note">{{percent .Stats.Embeddings.FullPaperChunked .Stats.Embeddings.FullPaperTexts}} chunked for full-body search.</div>
+			<div class="admin-metric-note">{{formatInt .Stats.Embeddings.PendingFullPaperFetch}} still need PDF text extraction.</div>
+		</div>
+		<div class="admin-metric">
+			<div class="admin-metric-label">Full-paper fetch failures</div>
+			<div class="admin-metric-value">{{formatInt .Stats.Embeddings.FullPaperFetchFailed}}</div>
+			<div class="admin-metric-note">{{formatInt .Stats.Embeddings.FullPaperFetchProcessing}} currently processing.</div>
 		</div>
 	</div>
 </div>
@@ -79,10 +84,16 @@
 				<td><span class="status-real">REAL</span> papers with title + abstract text</td>
 			</tr>
 			<tr>
-				<td>Full-paper texts available</td>
+				<td>Full-paper text extraction</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperTexts}}</td>
+				<td>{{formatInt .Stats.Embeddings.PendingFullPaperFetch}}</td>
+				<td><span class="status-real">REAL</span> papers.pdf_text rows; fetched by the full-paper worker</td>
+			</tr>
+			<tr>
+				<td>Full-paper text chunking</td>
+				<td>{{formatInt .Stats.Embeddings.FullPaperChunked}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaperText}}</td>
-				<td><span class="status-real">REAL</span> papers with extracted PDF text not yet chunked</td>
+				<td><span class="status-real">REAL</span> extracted PDF texts not yet chunked</td>
 			</tr>
 			<tr>
 				<td>Abstract semantic search, MiniLM 384d</td>

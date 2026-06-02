@@ -88,13 +88,21 @@ QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
 python3 tools/qwen_embeddings_v2.py --limit 10000 --batch-size 16 --refresh-stale
 ```
 
-Backfill full-paper chunks separately:
+Fetch/extract full-paper text, then backfill chunks separately:
 
 ```bash
+python3 tools/fetch_full_paper_text.py \
+  --limit 100 \
+  --categories cs.AI,cs.LG,cs.CL,cs.CV,stat.ML,cs.RO \
+  --rate-limit-seconds 3
 python3 tools/chunk_full_papers.py --limit 1000
 QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
 python3 tools/qwen_chunk_embeddings_v2.py --limit 10000 --batch-size 16
 ```
+
+`fetch_full_paper_text.py` downloads PDFs into a temporary file only, extracts
+text with `pdftotext`, stores `papers.pdf_text`, and tracks retry state in
+`full_paper_fetch_status`. PDFs are not persisted by this worker.
 
 Check the GPU service and recent DB progress:
 

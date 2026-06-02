@@ -27,18 +27,21 @@ const (
 )
 
 type AdminEmbeddingStats struct {
-	MiniLMAbstracts      int64
-	QwenAbstracts        int64
-	FullAbstracts        int64
-	MissingAbstractText  int64
-	FullPaperTexts       int64
-	FullPaperChunked     int64
-	FullPaperChunks      int64
-	FullPaperEmbeddings  int64
-	PendingMiniLM        int64
-	PendingQwenAbstract  int64
-	PendingFullPaperText int64
-	PendingFullPaper     int64
+	MiniLMAbstracts          int64
+	QwenAbstracts            int64
+	FullAbstracts            int64
+	MissingAbstractText      int64
+	FullPaperTexts           int64
+	PendingFullPaperFetch    int64
+	FullPaperFetchProcessing int64
+	FullPaperFetchFailed     int64
+	FullPaperChunked         int64
+	FullPaperChunks          int64
+	FullPaperEmbeddings      int64
+	PendingMiniLM            int64
+	PendingQwenAbstract      int64
+	PendingFullPaperText     int64
+	PendingFullPaper         int64
 }
 
 type AdminUserStats struct {
@@ -238,6 +241,10 @@ func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbedding
 		Count(&out.FullPaperTexts).Error; err != nil {
 		return err
 	}
+	out.PendingFullPaperFetch = maxInt64(totalPapers-out.FullPaperTexts, 0)
+	if err := c.countFullPaperFetchStatus(ctx, &out.FullPaperFetchProcessing, &out.FullPaperFetchFailed); err != nil {
+		return err
+	}
 	if err := c.db.WithContext(ctx).Model(&PaperChunk{}).
 		Where("scope = ?", "pdf_text").
 		Distinct("paper_id").
@@ -259,6 +266,34 @@ func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbedding
 	out.PendingQwenAbstract = maxInt64(out.FullAbstracts-out.QwenAbstracts, 0)
 	out.PendingFullPaperText = maxInt64(out.FullPaperTexts-out.FullPaperChunked, 0)
 	return nil
+}
+
+func (c *Cache) countFullPaperFetchStatus(ctx context.Context, processing, failed *int64) error {
+	if c.dbType != DBTypePostgres {
+		*processing = 0
+		*failed = 0
+		return nil
+	}
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return err
+	}
+	var tableName *string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT to_regclass('public.full_paper_fetch_status')`).Scan(&tableName); err != nil {
+		return err
+	}
+	if tableName == nil {
+		*processing = 0
+		*failed = 0
+		return nil
+	}
+	row := sqlDB.QueryRowContext(ctx, `
+		SELECT
+			count(*) FILTER (WHERE status = 'processing'),
+			count(*) FILTER (WHERE status = 'failed')
+		FROM full_paper_fetch_status
+	`)
+	return row.Scan(processing, failed)
 }
 
 func (c *Cache) countFullPaperEmbeddings(ctx context.Context, total *int64) error {
