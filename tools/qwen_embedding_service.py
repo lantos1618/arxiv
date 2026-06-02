@@ -37,6 +37,7 @@ EMBEDDING_DIM = int(os.environ.get("QWEN_EMBEDDING_DIM", "1024"))
 DEVICE = os.environ.get("QWEN_EMBEDDING_DEVICE", "cuda")
 MAX_BATCH_SIZE = int(os.environ.get("QWEN_MAX_BATCH_SIZE", "128"))
 MAX_TEXT_CHARS = int(os.environ.get("QWEN_MAX_TEXT_CHARS", "24000"))
+TORCH_DTYPE = os.environ.get("QWEN_TORCH_DTYPE", "bfloat16").lower()
 
 model: Optional[SentenceTransformer] = None
 started_at = time.time()
@@ -69,6 +70,7 @@ class HealthResponse(BaseModel):
     device: str
     max_batch_size: int
     max_text_chars: int
+    torch_dtype: str
     uptime_seconds: float
     cuda_allocated_gb: float = 0
     cuda_reserved_gb: float = 0
@@ -97,6 +99,18 @@ def seconds_ago(value: Optional[float]) -> Optional[float]:
     return round(time.time() - value, 3)
 
 
+def resolve_torch_dtype(name: str):
+    if name in ("auto", ""):
+        return None
+    if name in ("float16", "fp16", "half"):
+        return torch.float16
+    if name in ("bfloat16", "bf16"):
+        return torch.bfloat16
+    if name in ("float32", "fp32"):
+        return torch.float32
+    raise ValueError(f"unsupported QWEN_TORCH_DTYPE={name!r}")
+
+
 def record_error(message: str, is_oom: bool = False) -> None:
     global errors_total, last_error_at, last_error, oom_total
     errors_total += 1
@@ -110,12 +124,16 @@ def record_error(message: str, is_oom: bool = False) -> None:
 async def lifespan(app: FastAPI):
     global model
 
-    logger.info("loading model=%s dim=%s device=%s", MODEL_NAME, EMBEDDING_DIM, DEVICE)
+    torch_dtype = resolve_torch_dtype(TORCH_DTYPE)
+    logger.info("loading model=%s dim=%s device=%s dtype=%s", MODEL_NAME, EMBEDDING_DIM, DEVICE, TORCH_DTYPE)
     start = time.time()
+    model_kwargs = {}
+    if torch_dtype is not None:
+        model_kwargs["torch_dtype"] = torch_dtype
     model = SentenceTransformer(
         MODEL_NAME,
         device=DEVICE,
-        model_kwargs={"torch_dtype": torch.bfloat16},
+        model_kwargs=model_kwargs,
         processor_kwargs={"padding_side": "left"},
         truncate_dim=EMBEDDING_DIM,
     )
@@ -144,6 +162,7 @@ async def health():
         device=DEVICE,
         max_batch_size=MAX_BATCH_SIZE,
         max_text_chars=MAX_TEXT_CHARS,
+        torch_dtype=TORCH_DTYPE,
         uptime_seconds=time.time() - started_at,
         cuda_allocated_gb=round(allocated, 3),
         cuda_reserved_gb=round(reserved, 3),
