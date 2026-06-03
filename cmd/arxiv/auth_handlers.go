@@ -70,6 +70,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_, googleEnabled := configuredGoogleOAuth(r)
 	data := map[string]any{
 		"Title":         "Sign in",
+		"Description":   "Sign in to arXiv.gg with Google to use Deep Search, keep your reading history, and discover papers readers like you are opening.",
 		"Next":          next,
 		"GoogleEnabled": googleEnabled,
 	}
