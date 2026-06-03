@@ -157,8 +157,8 @@ func adminPlaceholders() []adminPlaceholderView {
 		},
 		{
 			Area: "GPU worker host",
-			What: "PLACEHOLDER: remote L40S worker health is not attached to this app yet.",
-			Why:  "When the worker exists, expose a small signed status endpoint and show it here.",
+			What: "PLACEHOLDER: remote V100S/Qwen worker health is not attached to this app yet.",
+			Why:  "The worker is checked through ops tools today; expose a small signed status endpoint before showing it as an app metric.",
 		},
 	}
 }

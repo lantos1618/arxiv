@@ -72,7 +72,6 @@ def fetch_chunks(conn, model, dim, scope, limit, order):
           AND COALESCE(c.text, '') <> ''
           AND (
               e.chunk_id IS NULL
-              OR e.vector IS NULL
               OR e.source_hash IS DISTINCT FROM c.text_hash
           )
         ORDER BY {order_sql}
@@ -88,6 +87,11 @@ def store_batch(conn, rows, embeddings, model, dim):
     for (chunk_id, text, stored_hash, text_chars, token_estimate, _reason), embedding in zip(rows, embeddings):
         text = normalize_text(text)
         row_hash = stored_hash or source_hash(text)
+        try:
+            vector = vector_literal(embedding)
+        except (TypeError, ValueError) as err:
+            print(f"store invalid embedding marker chunk_id={chunk_id}: {err}", flush=True)
+            vector = None
         payload.append(
             (
                 chunk_id,
@@ -96,9 +100,12 @@ def store_batch(conn, rows, embeddings, model, dim):
                 row_hash,
                 text_chars or len(text),
                 token_estimate or max(1, len(text) // 4),
-                vector_literal(embedding),
+                vector,
             )
         )
+    if not payload:
+        print("No embeddings in batch; skipping store.", flush=True)
+        return
 
     with conn.cursor() as cur:
         cur.executemany(

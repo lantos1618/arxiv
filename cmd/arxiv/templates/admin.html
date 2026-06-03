@@ -74,42 +74,49 @@
 
 <div class="admin-section">
 	<h2>Embedding Progress</h2>
+	<p class="admin-metric-note">Database-backed counts from the latest admin snapshot. The snapshot refreshes in the background, so these numbers can trail active workers by up to about a minute.</p>
 	<table class="admin-table">
-		<thead><tr><th>Track</th><th>Done</th><th>Remaining</th><th>Source</th></tr></thead>
+		<thead><tr><th>Track</th><th>Done</th><th>Remaining</th><th>Coverage</th><th>Source</th></tr></thead>
 		<tbody>
 			<tr>
 				<td>Full abstracts available</td>
 				<td>{{formatInt .Stats.Embeddings.FullAbstracts}}</td>
 				<td>{{formatInt .Stats.Embeddings.MissingAbstractText}}</td>
+				<td>{{percent .Stats.Embeddings.FullAbstracts .Stats.Cache.TotalPapers}}</td>
 				<td><span class="status-real">REAL</span> papers with title + abstract text</td>
 			</tr>
 			<tr>
 				<td>Full-paper text extraction</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperTexts}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaperFetch}}</td>
+				<td>{{percent .Stats.Embeddings.FullPaperTexts .Stats.Cache.TotalPapers}}</td>
 				<td><span class="status-real">REAL</span> papers.pdf_text rows; fetched by the full-paper worker</td>
 			</tr>
 			<tr>
 				<td>Full-paper text chunking</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperChunked}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaperText}}</td>
+				<td>{{percent .Stats.Embeddings.FullPaperChunked .Stats.Embeddings.FullPaperTexts}}</td>
 				<td><span class="status-real">REAL</span> extracted PDF texts not yet chunked</td>
 			</tr>
 			<tr>
 				<td>Abstract semantic search, MiniLM 384d</td>
 				<td>{{formatInt .Stats.Embeddings.MiniLMAbstracts}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingMiniLM}}</td>
+				<td>{{percent .Stats.Embeddings.MiniLMAbstracts .Stats.Embeddings.FullAbstracts}}</td>
 				<td><span class="status-real">REAL</span> embeddings table</td>
 			</tr>
 			<tr>
 				<td>Abstract semantic search, Qwen 1024d</td>
 				<td>{{formatInt .Stats.Embeddings.QwenAbstracts}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingQwenAbstract}}</td>
+				<td>{{percent .Stats.Embeddings.QwenAbstracts .Stats.Embeddings.FullAbstracts}}</td>
 				<td><span class="status-real">REAL</span> embeddings_v2 abstract rows</td>
 			</tr>
 			<tr>
 				<td>Full-paper chunks</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperChunks}}</td>
+				<td>-</td>
 				<td>-</td>
 				<td><span class="status-real">REAL</span> paper_chunks rows</td>
 			</tr>
@@ -117,6 +124,7 @@
 				<td>Full-paper chunk embeddings</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperEmbeddings}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaper}}</td>
+				<td>{{percent .Stats.Embeddings.FullPaperEmbeddings .Stats.Embeddings.FullPaperChunks}}</td>
 				<td><span class="status-real">REAL</span> chunk_embeddings_v2 rows</td>
 			</tr>
 		</tbody>

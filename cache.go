@@ -341,14 +341,29 @@ func (c *Cache) initPostgresSchema() error {
 }
 
 func (c *Cache) execPostgresSchema(query string) error {
-	if err := c.db.Exec(query).Error; err != nil {
+	err := c.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SET LOCAL lock_timeout = '2s'`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(query).Error
+	})
+	if err != nil {
 		preview := strings.Join(strings.Fields(query), " ")
 		if len(preview) > 120 {
 			preview = preview[:120] + "..."
 		}
+		if isPostgresLockTimeout(err) {
+			log.Printf("Warning: skipped postgres schema statement due to lock timeout: %s", preview)
+			return nil
+		}
 		return fmt.Errorf("postgres schema: %s: %w", preview, err)
 	}
 	return nil
+}
+
+func isPostgresLockTimeout(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "SQLSTATE 55P03") || strings.Contains(strings.ToLower(msg), "lock timeout")
 }
 
 // Stats returns cache statistics, served from an in-memory cache to avoid

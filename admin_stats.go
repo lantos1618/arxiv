@@ -232,7 +232,7 @@ func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbedding
 		return err
 	}
 	if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
-		Where("scope = ? AND model = ? AND dim = ?", "abstract", adminQwenModel, adminQwenDim).
+		Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", adminQwenModel, adminQwenDim).
 		Count(&out.QwenAbstracts).Error; err != nil {
 		return err
 	}

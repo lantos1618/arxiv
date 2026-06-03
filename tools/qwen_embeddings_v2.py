@@ -55,11 +55,10 @@ def fetch_papers(conn, model, scope, dim, limit, order, refresh_stale=False, aft
     order_sql = "src.fetched_at DESC NULLS LAST, src.created DESC NULLS LAST"
     if order == "random":
         order_sql = "random()"
-    stale_clause = "e.paper_id IS NULL OR e.vector IS NULL"
+    stale_clause = "e.paper_id IS NULL"
     if refresh_stale:
         stale_clause = """
             e.paper_id IS NULL
-            OR e.vector IS NULL
             OR e.source_hash IS DISTINCT FROM encode(digest(
                 CASE
                     WHEN src.title_text <> '' AND src.abstract_text <> '' THEN src.title_text || '. ' || src.abstract_text
@@ -133,7 +132,6 @@ def fetch_papers_by_id(conn, model, scope, dim, limit, refresh_stale=False, afte
           AND COALESCE(p.abstract, '') <> ''
           AND (
               e.paper_id IS NULL
-              OR e.vector IS NULL
               OR e.source_hash IS DISTINCT FROM encode(digest(
                   CASE
                       WHEN trim(COALESCE(p.title, '')) <> ''
@@ -164,6 +162,11 @@ def store_batch(conn, rows, embeddings, model, scope, dim):
     payload = []
     for (paper_id, title, abstract), embedding in zip(rows, embeddings):
         text = paper_text(title, abstract)
+        try:
+            vector = vector_literal(embedding)
+        except (TypeError, ValueError) as err:
+            print(f"store invalid embedding marker paper_id={paper_id}: {err}", flush=True)
+            vector = None
         payload.append(
             (
                 paper_id,
@@ -173,9 +176,12 @@ def store_batch(conn, rows, embeddings, model, scope, dim):
                 source_hash(text),
                 len(text),
                 max(1, len(text) // 4),
-                vector_literal(embedding),
+                vector,
             )
         )
+    if not payload:
+        print("No embeddings in batch; skipping store.", flush=True)
+        return
 
     with conn.cursor() as cur:
         cur.executemany(
