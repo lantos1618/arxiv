@@ -72,28 +72,8 @@
 	</div>
 </div>
 
-<div class="admin-section">
-	<h2>Deployment Endpoints</h2>
-	<table class="admin-table">
-		<thead><tr><th>Deployment / Container</th><th>Role</th><th>Status</th><th>Host / IP</th><th>Port</th><th>URL</th><th>Notes</th></tr></thead>
-		<tbody>
-			{{range .Deployments}}
-			<tr>
-				<td>{{.Name}}</td>
-				<td>{{.Role}}</td>
-				<td>{{.Status}}</td>
-				<td>{{.HostIP}}</td>
-				<td>{{.Port}}</td>
-				<td>{{if .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.URL}}</a>{{else}}-{{end}}</td>
-				<td>{{.Notes}}</td>
-			</tr>
-			{{end}}
-		</tbody>
-	</table>
-</div>
-
-<div class="admin-section">
-	<h2>Embedding Progress</h2>
+	<div class="admin-section">
+		<h2>Embedding Progress</h2>
 	<p class="admin-metric-note">Database-backed counts from the latest admin snapshot. The snapshot refreshes in the background, so these numbers can trail active workers by up to about a minute.</p>
 	<table class="admin-table">
 		<thead><tr><th>Track</th><th>Done</th><th>Remaining</th><th>Coverage</th><th>Source</th></tr></thead>

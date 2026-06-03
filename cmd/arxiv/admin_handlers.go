@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
 	"log"
-	"net"
 	"net/http"
-	"strconv"
-	"time"
 )
 
 type adminPlanView struct {
@@ -21,16 +17,6 @@ type adminPlaceholderView struct {
 	Area string
 	What string
 	Why  string
-}
-
-type adminDeploymentView struct {
-	Name   string
-	Role   string
-	Status string
-	HostIP string
-	Port   string
-	URL    string
-	Notes  string
 }
 
 func (s *server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +39,6 @@ func (s *server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Title":        "Admin",
 		"Stats":        stats,
 		"Plans":        simplePlanModel(),
-		"Deployments":  adminDeployments(r.Context()),
 		"Placeholders": adminPlaceholders(),
 	})
 }
@@ -156,58 +141,6 @@ func simplePlanModel() []adminPlanView {
 			Placeholder: true,
 		},
 	}
-}
-
-func adminDeployments(ctx context.Context) []adminDeploymentView {
-	return []adminDeploymentView{
-		{
-			Name:   "merry-spark-ram",
-			Role:   "Deploy.me edge endpoint",
-			Status: "live",
-			HostIP: deploymentHostIP(ctx, "edge.deploy.me"),
-			Port:   "443",
-			URL:    "https://edge.deploy.me/run/merry-spark-ram",
-			Notes:  "Cloudflare edge address; IP can rotate.",
-		},
-		{
-			Name:   "arxiv-container",
-			Role:   "Go app container",
-			Status: "live",
-			HostIP: "127.0.0.1",
-			Port:   "80 -> 8080/tcp",
-			URL:    "https://arxiv.gg",
-			Notes:  "Public traffic reaches this through Cloudflare Tunnel.",
-		},
-		{
-			Name:   "arxiv-postgres",
-			Role:   "Postgres + pgvector",
-			Status: "private",
-			HostIP: "arxiv-postgres",
-			Port:   "5432/tcp",
-			Notes:  "Docker-network only; no public URL.",
-		},
-	}
-}
-
-func deploymentHostIP(ctx context.Context, host string) string {
-	lookupCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupHost(lookupCtx, host)
-	if err != nil || len(ips) == 0 {
-		return host
-	}
-	displayIP := ips[0]
-	for _, ip := range ips {
-		parsed := net.ParseIP(ip)
-		if parsed != nil && parsed.To4() != nil {
-			displayIP = ip
-			break
-		}
-	}
-	if len(ips) > 1 {
-		return host + " / " + displayIP + " (+" + strconv.Itoa(len(ips)-1) + " more)"
-	}
-	return host + " / " + displayIP
 }
 
 func adminPlaceholders() []adminPlaceholderView {
