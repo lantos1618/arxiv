@@ -1,6 +1,15 @@
 {{define "index"}}
 {{template "head" .}}
 <h1>arXiv.gg</h1>
+<section class="home-intro" aria-labelledby="home-intro-title">
+	<h2 id="home-intro-title">The easiest way to search arXiv and find related papers</h2>
+	<p>Search by exact paper ID, author, keyword, or research idea, then open related-work maps for papers that are connected by meaning.</p>
+	<ul class="search-mode-summary" aria-label="Search modes">
+		<li><strong>Quick</strong><span>IDs, authors, keywords</span></li>
+		<li><strong>Search</strong><span>ideas across abstracts</span></li>
+		<li><strong>Deep</strong><span>full-paper text where available</span></li>
+	</ul>
+</section>
 <div class="search-container semantic-tooltip-open">
 	<form class="search-bar" action="/search" method="get" id="search-form" role="search">
 		<input type="text" name="q" id="search-input" class="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off" aria-label="Search papers">

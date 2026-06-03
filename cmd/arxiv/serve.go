@@ -655,10 +655,13 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	// Papers are now loaded via SSE in the client
 	data := map[string]any{
-		"Title":    "Home",
-		"Stats":    stats,
-		"Coverage": s.coverageSignal(stats),
-		"Query":    "",
+		"Title":          "Search arXiv Papers",
+		"Description":    homeDescription(),
+		"CanonicalURL":   canonicalURL("/"),
+		"StructuredData": homeStructuredData(),
+		"Stats":          stats,
+		"Coverage":       s.coverageSignal(stats),
+		"Query":          "",
 	}
 	s.renderTemplate(w, r, "index", data)
 }
@@ -1488,6 +1491,27 @@ func categoryPath(category string) string {
 
 func canonicalURL(path string) string {
 	return strings.TrimRight(arxiv.SiteBaseURL(), "/") + path
+}
+
+func homeDescription() string {
+	return "Search arXiv papers by ID, author, keyword, or research idea on arXiv.gg. Find related papers, citation context, PDFs, and semantic related-work maps."
+}
+
+func homeStructuredData() template.JS {
+	base := strings.TrimRight(arxiv.SiteBaseURL(), "/")
+	data := map[string]any{
+		"@context":    "https://schema.org",
+		"@type":       "WebSite",
+		"name":        "arXiv.gg",
+		"url":         base + "/",
+		"description": homeDescription(),
+		"potentialAction": map[string]any{
+			"@type":       "SearchAction",
+			"target":      base + "/search?q={search_term_string}",
+			"query-input": "required name=search_term_string",
+		},
+	}
+	return jsonScript(data)
 }
 
 func summaryText(s string, maxRunes int) string {
