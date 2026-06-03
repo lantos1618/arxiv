@@ -415,6 +415,22 @@ func (s *server) handleAPISearchQuick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	type authorSuggestion struct {
+		Name       string `json:"name"`
+		Path       string `json:"path"`
+		PaperCount int64  `json:"paperCount"`
+	}
+	authors := []authorSuggestion{}
+	if author, ok := authorQueryCandidate(query); ok {
+		if paperCount := s.cache.CountPapersByAuthor(ctx, author); paperCount > 0 {
+			authors = append(authors, authorSuggestion{
+				Name:       author,
+				Path:       authorPath(author),
+				PaperCount: paperCount,
+			})
+		}
+	}
+
 	papers, total, err := s.cache.QuickSearch(ctx, query, limit)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, APIResponse{
@@ -427,9 +443,11 @@ func (s *server) handleAPISearchQuick(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"papers": papers,
-			"count":  len(papers),
-			"total":  total,
+			"papers":      papers,
+			"count":       len(papers),
+			"total":       total,
+			"authors":     authors,
+			"authorCount": len(authors),
 		},
 	})
 }
@@ -510,11 +528,20 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 
 		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
+			if searchMode == "deep" {
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":  "error",
+					"error": "Failed to understand query: " + err.Error(),
+				}))
+				flusher.Flush()
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "error",
-				"error": "Failed to understand query: " + err.Error(),
+				"type":    "status",
+				"message": "Idea search is unavailable; showing keyword matches...",
 			}))
 			flusher.Flush()
+			streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit)
 			return
 		}
 
@@ -591,38 +618,42 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 	} else {
-		papers, err := s.cache.Search(ctx, query, category, limit)
-		if err != nil {
-			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "error",
-				"error": err.Error(),
-			}))
-			flusher.Flush()
-			return
-		}
+		streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit)
+	}
+}
 
-		for i, paper := range papers {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-					"type":    "result",
-					"index":   i,
-					"paper":   paper,
-					"paperId": paper.ID,
-				}))
-				flusher.Flush()
-			}
-		}
-
+func streamKeywordSearchResults(ctx context.Context, w io.Writer, flusher http.Flusher, cache *arxiv.Cache, query, category string, limit int) {
+	papers, err := cache.Search(ctx, query, category, limit)
+	if err != nil {
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "complete",
-			"count": len(papers),
-			"mode":  "quick",
+			"type":  "error",
+			"error": err.Error(),
 		}))
 		flusher.Flush()
+		return
 	}
+
+	for i, paper := range papers {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+				"type":    "result",
+				"index":   i,
+				"paper":   paper,
+				"paperId": paper.ID,
+			}))
+			flusher.Flush()
+		}
+	}
+
+	fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+		"type":  "complete",
+		"count": len(papers),
+		"mode":  "quick",
+	}))
+	flusher.Flush()
 }
 
 func normalizeSearchMode(r *http.Request) string {
@@ -638,6 +669,40 @@ func normalizeSearchMode(r *http.Request) string {
 	default:
 		return "search"
 	}
+}
+
+func authorQueryCandidate(query string) (string, bool) {
+	query = strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
+	if len(query) < 3 || len(query) > 80 || strings.ContainsAny(query, "/\\@?=&:") {
+		return "", false
+	}
+	parts := strings.Fields(query)
+	if len(parts) < 2 || len(parts) > 5 {
+		return "", false
+	}
+	for _, part := range parts {
+		if strings.ContainsAny(part, "0123456789") {
+			return "", false
+		}
+	}
+	if !hasAuthorNameCasing(parts) {
+		return "", false
+	}
+	return query, true
+}
+
+func hasAuthorNameCasing(parts []string) bool {
+	for _, part := range parts {
+		part = strings.TrimLeft(part, `("'[`)
+		if part == "" {
+			continue
+		}
+		ch := part[0]
+		if ch >= 'A' && ch <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 func searchModeProgressMessage(mode string) string {

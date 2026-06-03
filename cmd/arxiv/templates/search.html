@@ -26,7 +26,7 @@
 	<div class="semantic-search-tooltip is-visible" id="semantic-search-tooltip" role="tooltip" data-semantic-tooltip>Search is for ideas, methods, and problems across paper abstracts. Use Quick for exact words or IDs. Use Deep for full-paper text when available.</div>
 </div>
 
-<p id="search-status"></p>
+<p id="search-status">{{.SearchNotice}}</p>
 <div id="paper-results">
 {{if .IsDeep}}
 {{range .DeepResults}}

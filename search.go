@@ -81,6 +81,10 @@ func (c *Cache) quickSearchPostgres(ctx context.Context, query string, limit int
 	if papers, ok, err := c.quickSearchPostgresID(ctx, query, limit); ok || err != nil {
 		return papers, len(papers), err
 	}
+	if looksLikeAuthorSearchQuery(query) && c.CountPapersByAuthor(ctx, query) > 0 {
+		papers, err := c.SearchByAuthor(ctx, query, limit)
+		return papers, len(papers), err
+	}
 
 	fetchLimit := limit + 1
 	var papers []Paper
@@ -144,6 +148,37 @@ func looksLikePaperIDPrefix(query string) bool {
 		return false
 	}
 	return strings.ContainsAny(query, "0123456789./")
+}
+
+func looksLikeAuthorSearchQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	if len(query) < 3 || len(query) > 80 || strings.ContainsAny(query, "/\\@?=&:") {
+		return false
+	}
+	parts := strings.Fields(query)
+	if len(parts) < 2 || len(parts) > 5 {
+		return false
+	}
+	for _, part := range parts {
+		if strings.ContainsAny(part, "0123456789") {
+			return false
+		}
+	}
+	return hasNameCasing(parts)
+}
+
+func hasNameCasing(parts []string) bool {
+	for _, part := range parts {
+		part = strings.TrimLeft(part, `("'[`)
+		if part == "" {
+			continue
+		}
+		ch := part[0]
+		if ch >= 'A' && ch <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 func nextStringPrefix(prefix string) (string, bool) {

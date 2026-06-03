@@ -245,29 +245,39 @@
 				// Ignore if a newer request was made
 				if (thisRequestId !== searchRequestId) return;
 
-				// API returns {success, data: {count, papers}}
-				const papers = resp.data?.papers || [];
-				const total = resp.data?.count || papers.length;
+					// API returns {success, data: {count, papers, authors}}
+					const papers = resp.data?.papers || [];
+					const authors = resp.data?.authors || [];
+					const total = resp.data?.total || resp.data?.count || papers.length;
 
-				if (papers.length === 0) {
-					dropdown.innerHTML = '<div class="dropdown-status">No results found</div>';
-					dropdownItems = [];
-					return;
-				}
-				let html = '';
-				papers.forEach(p => {
-					const id = p.id || p.ID;
-					const title = p.title || p.Title || '';
-					const authors = p.authors || p.Authors || '';
-					html += '<a class="dropdown-item" href="' + encodeURI('/abs/' + id) + '">' +
+					if (authors.length === 0 && papers.length === 0) {
+						dropdown.innerHTML = '<div class="dropdown-status">No results found</div>';
+						dropdownItems = [];
+						return;
+					}
+					let html = '';
+					authors.forEach(a => {
+						const name = a.name || a.Name || '';
+						const path = a.path || a.Path || ('/author/' + encodeURIComponent(name));
+						const paperCount = a.paperCount || a.PaperCount || 0;
+						html += '<a class="dropdown-item" href="' + encodeURI(path) + '">' +
+							'<div class="dropdown-item-id">Author</div>' +
+							'<div class="dropdown-item-title">' + escapeHtml(name) + '</div>' +
+							'<div class="dropdown-item-authors">' + escapeHtml(String(paperCount)) + ' papers</div></a>';
+					});
+					papers.forEach(p => {
+						const id = p.id || p.ID;
+						const title = p.title || p.Title || '';
+						const authors = p.authors || p.Authors || '';
+						html += '<a class="dropdown-item" href="' + encodeURI('/abs/' + id) + '">' +
 						'<div class="dropdown-item-id">' + id + '</div>' +
 						'<div class="dropdown-item-title" data-mathjax>' + escapeHtml(title) + '</div>' +
 						'<div class="dropdown-item-authors">' + escapeHtml(authors) + '</div></a>';
 				});
-				if (total > 10) {
-					html += '<div class="dropdown-footer"><span>' + total + ' total results</span>' +
-						'<a href="/search?q=' + encodeURIComponent(query) + '">View all →</a></div>';
-				}
+					if (total > 10) {
+						html += '<div class="dropdown-footer"><span>' + total + ' paper results</span>' +
+							'<a href="/search?q=' + encodeURIComponent(query) + '">View all →</a></div>';
+					}
 				dropdown.innerHTML = html;
 				dropdownItems = Array.from(dropdown.querySelectorAll('.dropdown-item'));
 				if (window.typesetMath) window.typesetMath(dropdown);

@@ -83,11 +83,11 @@
 .area-bar-count { font-size: 0.7rem; color: #666; min-width: 30px; text-align: right; }
 
 /* Timeline Chart */
-.timeline-chart { height: 120px; display: flex; align-items: flex-end; gap: 2px; }
-.timeline-bar { flex: 1; background: #0066cc; border-radius: 2px 2px 0 0; min-width: 8px; position: relative; cursor: default; }
-.timeline-bar:hover { background: #0052a3; }
-.timeline-bar::after { content: attr(data-year); position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%); font-size: 0.6rem; color: #999; white-space: nowrap; }
-.timeline-bar:nth-child(5n)::after { color: #666; }
+	.timeline-chart { height: 120px; display: flex; align-items: flex-end; gap: 2px; margin-bottom: 1.5rem; }
+	.timeline-bar { flex: 1; background: #0066cc; border-radius: 2px 2px 0 0; min-width: 8px; position: relative; cursor: default; }
+	.timeline-bar:hover { background: #0052a3; }
+	.timeline-bar::after { content: ""; }
+	.timeline-bar.show-year::after { content: attr(data-year); position: absolute; bottom: -22px; left: 50%; transform: translateX(-50%) rotate(-35deg); transform-origin: top center; font-size: 0.6rem; color: #666; white-space: nowrap; }
 
 /* Graph */
 .graph-container { background: #fafafa; border: 1px solid #e9ecef; border-radius: 8px; overflow: hidden; }
@@ -166,13 +166,17 @@
 
 			// Render timeline
 			const timelineChart = document.getElementById('timeline-chart');
-			if (profile.yearly_output && profile.yearly_output.length > 0) {
-				const maxPapers = Math.max(...profile.yearly_output.map(y => Number(y.paper_count) || 0)) || 1;
-				timelineChart.innerHTML = profile.yearly_output.map(y => `
-					<div class="timeline-bar" style="height: ${Math.max(4, (Number(y.paper_count) || 0) / maxPapers * 100)}%"
-						 data-year="${escapeAttr(y.year)}" title="${escapeAttr(y.year)}: ${escapeAttr(y.paper_count)} papers"></div>
-				`).join('');
-			} else {
+				if (profile.yearly_output && profile.yearly_output.length > 0) {
+					const maxPapers = Math.max(...profile.yearly_output.map(y => Number(y.paper_count) || 0)) || 1;
+					const yearStride = Math.max(1, Math.ceil(profile.yearly_output.length / 6));
+					timelineChart.innerHTML = profile.yearly_output.map((y, index) => {
+						const showYear = index === 0 || index === profile.yearly_output.length - 1 || index % yearStride === 0;
+						return `
+						<div class="timeline-bar${showYear ? ' show-year' : ''}" style="height: ${Math.max(4, (Number(y.paper_count) || 0) / maxPapers * 100)}%"
+							 data-year="${escapeAttr(y.year)}" title="${escapeAttr(y.year)}: ${escapeAttr(y.paper_count)} papers"></div>
+					`;
+					}).join('');
+				} else {
 				timelineChart.innerHTML = '<p style="color:#999;font-size:0.85rem;">No timeline data</p>';
 			}
 		})

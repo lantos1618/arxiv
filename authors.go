@@ -30,9 +30,9 @@ func normalizeAuthor(name string) string {
 
 // CollaboratorInfo contains information about a collaborator.
 type CollaboratorInfo struct {
-	Author     string    `json:"author"`
-	PaperCount int       `json:"paper_count"`
-	PaperIDs   []string  `json:"paper_ids"`
+	Author      string    `json:"author"`
+	PaperCount  int       `json:"paper_count"`
+	PaperIDs    []string  `json:"paper_ids"`
 	FirstCollab time.Time `json:"first_collab"`
 	LastCollab  time.Time `json:"last_collab"`
 }
@@ -384,9 +384,9 @@ func (c *Cache) HasAuthorEmbedding(ctx context.Context, author string) bool {
 
 // AuthorStats returns statistics about an author.
 type AuthorStats struct {
-	PaperCount       int `json:"paper_count"`
-	CollaboratorCount int `json:"collaborator_count"`
-	HasEmbedding     bool `json:"has_embedding"`
+	PaperCount        int  `json:"paper_count"`
+	CollaboratorCount int  `json:"collaborator_count"`
+	HasEmbedding      bool `json:"has_embedding"`
 }
 
 // getAuthorPaperCount returns the number of papers by an author, searching both name formats.
@@ -405,6 +405,11 @@ func (c *Cache) getAuthorPaperCount(ctx context.Context, author string) int64 {
 		c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ?", "%"+author+"%").Count(&count)
 	}
 	return count
+}
+
+// CountPapersByAuthor returns the number of cached papers by an author.
+func (c *Cache) CountPapersByAuthor(ctx context.Context, author string) int64 {
+	return c.getAuthorPaperCount(ctx, author)
 }
 
 // GetAuthorStats returns statistics for an author.
@@ -435,9 +440,9 @@ type CollabGraphNode struct {
 
 // CollabGraphEdge represents an edge in the collaboration graph.
 type CollabGraphEdge struct {
-	Source     string `json:"source"`
-	Target     string `json:"target"`
-	Weight     int    `json:"weight"` // number of papers together
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Weight int    `json:"weight"` // number of papers together
 }
 
 // AuthorGraph contains the collaboration network for visualization.
@@ -555,8 +560,8 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 
 // ResearchArea represents a research area with paper count.
 type ResearchArea struct {
-	Category   string `json:"category"`
-	PaperCount int    `json:"paper_count"`
+	Category   string  `json:"category"`
+	PaperCount int     `json:"paper_count"`
 	Percentage float64 `json:"percentage"`
 }
 
@@ -568,14 +573,14 @@ type YearlyOutput struct {
 
 // AuthorProfile contains comprehensive profile information.
 type AuthorProfile struct {
-	Name            string         `json:"name"`
-	TotalPapers     int            `json:"total_papers"`
-	TotalCollaborators int         `json:"total_collaborators"`
-	ResearchAreas   []ResearchArea `json:"research_areas"`
-	YearlyOutput    []YearlyOutput `json:"yearly_output"`
-	FirstPaper      *time.Time     `json:"first_paper"`
-	LastPaper       *time.Time     `json:"last_paper"`
-	HasEmbedding    bool           `json:"has_embedding"`
+	Name               string         `json:"name"`
+	TotalPapers        int            `json:"total_papers"`
+	TotalCollaborators int            `json:"total_collaborators"`
+	ResearchAreas      []ResearchArea `json:"research_areas"`
+	YearlyOutput       []YearlyOutput `json:"yearly_output"`
+	FirstPaper         *time.Time     `json:"first_paper"`
+	LastPaper          *time.Time     `json:"last_paper"`
+	HasEmbedding       bool           `json:"has_embedding"`
 }
 
 // GetAuthorProfile returns comprehensive profile for an author.

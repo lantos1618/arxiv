@@ -40,7 +40,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-https://arxiv.gg/auth/google/callback}
-      QWEN_EMBEDDING_SERVICE_URL: ${QWEN_EMBEDDING_SERVICE_URL:-}
+      QWEN_EMBEDDING_SERVICE_URL: ${QWEN_EMBEDDING_SERVICE_URL:-http://172.19.0.1:8010}
     volumes:
       - /data/arxiv:/data/arxiv
     tmpfs:

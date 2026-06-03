@@ -309,7 +309,7 @@
 <div class="authors">{{range $i, $a := parseAuthors .Paper.Authors}}{{if $i}}, {{end}}<a href="{{authorPath $a}}">{{$a}}</a>{{end}}</div>
 <div class="categories">{{range $i, $c := parseCategories .Paper.Categories}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
 
-<div class="abstract" data-mathjax>{{.Paper.Abstract}}</div>
+<div class="abstract" data-mathjax>{{cleanLatex .Paper.Abstract}}</div>
 
 <div class="actions">
 	{{if .LocalMode}}{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}" aria-label="View PDF" data-help="Open the locally cached PDF."><i class="btn-icon" aria-hidden="true">📄</i> View PDF</a>{{else}}<form id="fetch-pdf-form" style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary" type="submit" aria-label="Fetch PDF" data-help="Download and cache this paper's PDF."><i class="btn-icon" aria-hidden="true">📥</i> Fetch PDF</button></form> <label class="auto-fetch helpable" data-help="When enabled, pages you open will try to fetch missing PDFs automatically."><input type="checkbox" id="auto-fetch-toggle" aria-label="Auto-fetch PDFs"> Auto-fetch</label> <span id="fetch-status" class="loading" style="display:none;" aria-live="polite">Fetching PDF...</span>{{end}}{{else}}<a class="btn" href="https://arxiv.org/pdf/{{.Paper.ID}}.pdf" target="_blank" rel="noopener noreferrer" aria-label="Open PDF on arXiv.org" data-help="Open the official PDF on arXiv.org."><i class="btn-icon" aria-hidden="true">📄</i> PDF on arXiv.org</a>{{end}}
@@ -791,11 +791,15 @@
 			return palette[hashString(category) % palette.length];
 		}
 
-		function shortTitle(title, maxLen = 54) {
-			const clean = String(title || '').replace(/\s+/g, ' ').trim();
-			if (clean.length <= maxLen) return clean;
-			return clean.slice(0, maxLen - 1).trim() + '...';
-		}
+			function shortTitle(title, maxLen = 54) {
+				const clean = String(title || '').replace(/\s+/g, ' ').trim();
+				if (clean.length <= maxLen) return clean;
+				return clean.slice(0, maxLen - 1).trim() + '...';
+			}
+
+			function clampLabelX(x, width) {
+				return Math.max(72, Math.min(width - 72, Number(x) || 0));
+			}
 
 		function setSimilarButtonsDisabled(disabled) {
 			if (findSimilarBtn) findSimilarBtn.disabled = disabled;
@@ -919,10 +923,10 @@
 				.selectAll('text')
 				.data(mapNodes.filter(d => d.anchor || d.rank <= 14), d => d.id)
 				.join('text')
-				.attr('class', 'semantic-map-label')
-				.attr('text-anchor', 'middle')
-				.attr('dy', d => d.anchor ? -22 : -12)
-				.text(d => d.anchor ? 'this paper' : shortTitle(d.title, 32));
+					.attr('class', 'semantic-map-label')
+					.attr('text-anchor', 'middle')
+					.attr('dy', d => d.anchor ? -22 : -12)
+					.text(d => d.anchor ? 'this paper' : shortTitle(d.title, 24));
 
 			nodeSelection.call(d3.drag()
 				.on('start', event => {
@@ -977,9 +981,9 @@
 					nodeSelection
 						.attr('cx', d => d.x)
 						.attr('cy', d => d.y);
-					labelSelection
-						.attr('x', d => d.x)
-						.attr('y', d => d.y);
+						labelSelection
+							.attr('x', d => clampLabelX(d.x, width))
+							.attr('y', d => d.y);
 				});
 
 			const relatedCount = Math.max(0, mapNodes.length - 1);
@@ -1097,10 +1101,10 @@
 				.selectAll('text')
 				.data(mapNodes.filter(d => d.anchor || d.rank <= 10), d => d.id)
 				.join('text')
-				.attr('class', 'semantic-map-label')
-				.attr('text-anchor', 'middle')
-				.attr('dy', d => d.anchor ? -21 : -13)
-				.text(d => d.anchor ? 'this paper' : shortTitle(d.title, 34));
+					.attr('class', 'semantic-map-label')
+					.attr('text-anchor', 'middle')
+					.attr('dy', d => d.anchor ? -21 : -13)
+					.text(d => d.anchor ? 'this paper' : shortTitle(d.title, 24));
 
 			nodeSelection.call(d3.drag()
 				.on('start', event => {
@@ -1153,9 +1157,9 @@
 					nodeSelection
 						.attr('cx', d => d.x)
 						.attr('cy', d => d.y);
-					labelSelection
-						.attr('x', d => d.x)
-						.attr('y', d => d.y);
+						labelSelection
+							.attr('x', d => clampLabelX(d.x, width))
+							.attr('y', d => d.y);
 				});
 
 			if (semanticMapStatus) {

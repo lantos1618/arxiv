@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	"authorPath":      authorPath,
 	"categoryPath":    categoryPath,
 	"paperPath":       paperPath,
+	"cleanLatex":      cleanLatexText,
 	"mul": func(a, b interface{}) float64 {
 		var aFloat, bFloat float64
 		switch v := a.(type) {
@@ -91,6 +93,28 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 const defaultIndexNowKey = "34af0c26368622541e3ca8aa555c3ad7"
 const defaultOfficialArxivPapers = 3045638
 const defaultOfficialArxivPapersAsOf = "2026-05-16"
+
+var (
+	latexHrefPattern        = regexp.MustCompile(`\\href\{([^{}]*)\}\{([^{}]*)\}`)
+	latexURLPattern         = regexp.MustCompile(`\\url\{([^{}]*)\}`)
+	latexTextCommandPattern = regexp.MustCompile(`\\(?:textit|textbf|emph|mathrm|mathbf|texttt)\{([^{}]*)\}`)
+)
+
+func cleanLatexText(s string) string {
+	if s == "" {
+		return s
+	}
+	s = latexHrefPattern.ReplaceAllString(s, "$2 ($1)")
+	s = latexURLPattern.ReplaceAllString(s, "$1")
+	for i := 0; i < 3; i++ {
+		next := latexTextCommandPattern.ReplaceAllString(s, "$1")
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return s
+}
 
 func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -696,6 +720,10 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if author, ok := authorQueryCandidate(query); ok && s.cache.CountPapersByAuthor(ctx, author) > 0 {
+		http.Redirect(w, r, authorPath(author), http.StatusFound)
+		return
+	}
 	searchMode := normalizeSearchMode(r)
 
 	if r.URL.Query().Get("format") == "json" {
@@ -763,7 +791,27 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
-			http.Error(w, "Failed to understand query: "+err.Error(), http.StatusServiceUnavailable)
+			if searchMode == "deep" {
+				http.Error(w, "Failed to understand query: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			papers, searchErr := s.cache.Search(ctx, query, "", 100)
+			if searchErr != nil {
+				http.Error(w, searchErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			data = map[string]any{
+				"Title":           "Search",
+				"Query":           query,
+				"SearchMode":      "quick",
+				"IsSemantic":      false,
+				"IsDeep":          false,
+				"Papers":          papers,
+				"SemanticResults": []arxiv.SemanticResult{},
+				"DeepResults":     []arxiv.DeepSearchResult{},
+				"SearchNotice":    "Idea search is unavailable; showing keyword matches.",
+			}
+			s.renderTemplate(w, r, "search", data)
 			return
 		}
 
