@@ -35,8 +35,38 @@ func (c *Cache) UpdateCitations(ctx context.Context, paperID, srcPath string) er
 
 // CitedByCount returns the number of cached papers that cite this paper.
 func (c *Cache) CitedByCount(ctx context.Context, paperID string) (int, error) {
+	cacheKey := detailKey("cited_by_count", paperID)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if count, ok := cached.(int); ok {
+			return count, nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if count, ok := cached.(int); ok {
+				return count, nil
+			}
+		}
+		count, err := c.citedByCountUncached(ctx, paperID)
+		if err != nil {
+			return 0, err
+		}
+		c.putDetailCache(cacheKey, citationTTL, count)
+		return count, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	count, _ := value.(int)
+	return count, nil
+}
+
+func (c *Cache) citedByCountUncached(ctx context.Context, paperID string) (int, error) {
 	var count int64
-	err := c.db.WithContext(ctx).Model(&Citation{}).Where("to_id = ?", paperID).Count(&count).Error
+	err := c.withCitationQuery(ctx, func() error {
+		return c.db.WithContext(ctx).Model(&Citation{}).Where("to_id = ?", paperID).Count(&count).Error
+	})
 	return int(count), err
 }
 
@@ -50,16 +80,45 @@ func (c *Cache) CitedBy(ctx context.Context, paperID string, limit int) ([]Citin
 	if limit <= 0 {
 		limit = 50
 	}
+	cacheKey := detailKey("cited_by", paperID, fmt.Sprint(limit))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if papers, ok := cached.([]CitingPaper); ok {
+			return cloneCitingPapers(papers), nil
+		}
+	}
 
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if papers, ok := cached.([]CitingPaper); ok {
+				return cloneCitingPapers(papers), nil
+			}
+		}
+		papers, err := c.citedByUncached(ctx, paperID, limit)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, citationTTL, cloneCitingPapers(papers))
+		return papers, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	papers, _ := value.([]CitingPaper)
+	return cloneCitingPapers(papers), nil
+}
+
+func (c *Cache) citedByUncached(ctx context.Context, paperID string, limit int) ([]CitingPaper, error) {
 	var papers []CitingPaper
-	err := c.db.WithContext(ctx).
-		Table("citations").
-		Select("papers.id, papers.title").
-		Joins("JOIN papers ON citations.from_id = papers.id").
-		Where("citations.to_id = ?", paperID).
-		Order("papers.created DESC").
-		Limit(limit).
-		Scan(&papers).Error
+	err := c.withCitationQuery(ctx, func() error {
+		return c.db.WithContext(ctx).
+			Table("citations").
+			Select("papers.id, papers.title").
+			Joins("JOIN papers ON citations.from_id = papers.id").
+			Where("citations.to_id = ?", paperID).
+			Order("papers.created DESC").
+			Limit(limit).
+			Scan(&papers).Error
+	})
 	return papers, err
 }
 
@@ -72,6 +131,34 @@ type Reference struct {
 }
 
 func (c *Cache) References(ctx context.Context, paperID string) ([]Reference, error) {
+	cacheKey := detailKey("references", paperID)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if refs, ok := cached.([]Reference); ok {
+			return cloneReferences(refs), nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if refs, ok := cached.([]Reference); ok {
+				return cloneReferences(refs), nil
+			}
+		}
+		refs, err := c.referencesUncached(ctx, paperID)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, citationTTL, cloneReferences(refs))
+		return refs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	refs, _ := value.([]Reference)
+	return cloneReferences(refs), nil
+}
+
+func (c *Cache) referencesUncached(ctx context.Context, paperID string) ([]Reference, error) {
 	type refRow struct {
 		ID        string
 		Title     string
@@ -82,26 +169,41 @@ func (c *Cache) References(ctx context.Context, paperID string) ([]Reference, er
 	var rows []refRow
 	sqlDB, _ := c.db.DB()
 	placeholder := c.bindVar(1)
-	err := c.db.WithContext(ctx).
-		Table("citations").
-		Select("citations.to_id as id, COALESCE(papers.title, '') as title, "+
-			"CASE WHEN papers.id IS NOT NULL AND papers.title != '' THEN 1 ELSE 0 END as has_title, "+
-			"CASE WHEN papers.src_downloaded = true THEN 1 ELSE 0 END as has_source").
-		Joins("LEFT JOIN papers ON citations.to_id = papers.id").
-		Where("citations.from_id = ?", paperID).
-		Order("citations.to_id DESC").
-		Scan(&rows).Error
+	err := c.withCitationQuery(ctx, func() error {
+		return c.db.WithContext(ctx).
+			Table("citations").
+			Select("citations.to_id as id, COALESCE(papers.title, '') as title, "+
+				"CASE WHEN papers.id IS NOT NULL AND papers.title != '' THEN 1 ELSE 0 END as has_title, "+
+				"CASE WHEN papers.src_downloaded = true THEN 1 ELSE 0 END as has_source").
+			Joins("LEFT JOIN papers ON citations.to_id = papers.id").
+			Where("citations.from_id = ?", paperID).
+			Order("citations.to_id DESC").
+			Scan(&rows).Error
+	})
 	if err != nil {
 		// Fallback to raw SQL for complex CASE statements
-		rawRows, err := sqlDB.QueryContext(ctx, `
-			SELECT c.to_id, COALESCE(p.title, ''),
-			       CASE WHEN p.id IS NOT NULL AND p.title != '' THEN 1 ELSE 0 END,
-			       CASE WHEN p.src_downloaded = true THEN 1 ELSE 0 END
-				FROM citations c
-				LEFT JOIN papers p ON c.to_id = p.id
-				WHERE c.from_id = `+placeholder+`
-				ORDER BY c.to_id DESC
-			`, paperID)
+		var rawRows interface {
+			Close() error
+			Next() bool
+			Scan(dest ...interface{}) error
+			Err() error
+		}
+		err := c.withCitationQuery(ctx, func() error {
+			rows, err := sqlDB.QueryContext(ctx, `
+				SELECT c.to_id, COALESCE(p.title, ''),
+				       CASE WHEN p.id IS NOT NULL AND p.title != '' THEN 1 ELSE 0 END,
+				       CASE WHEN p.src_downloaded = true THEN 1 ELSE 0 END
+					FROM citations c
+					LEFT JOIN papers p ON c.to_id = p.id
+					WHERE c.from_id = `+placeholder+`
+					ORDER BY c.to_id DESC
+				`, paperID)
+			if err != nil {
+				return err
+			}
+			rawRows = rows
+			return nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -135,14 +237,26 @@ func (c *Cache) References(ctx context.Context, paperID string) ([]Reference, er
 
 // UncachedReferenceCount returns the number of references without metadata.
 func (c *Cache) UncachedReferenceCount(ctx context.Context, paperID string) (int, error) {
+	cacheKey := detailKey("uncached_reference_count", paperID)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if count, ok := cached.(int); ok {
+			return count, nil
+		}
+	}
+
 	var count int64
 	sqlDB, _ := c.db.DB()
 	placeholder := c.bindVar(1)
-	err := sqlDB.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM citations c
-		LEFT JOIN papers p ON c.to_id = p.id
-		WHERE c.from_id = `+placeholder+` AND (p.id IS NULL OR p.title = '')
-	`, paperID).Scan(&count)
+	err := c.withCitationQuery(ctx, func() error {
+		return sqlDB.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM citations c
+			LEFT JOIN papers p ON c.to_id = p.id
+			WHERE c.from_id = `+placeholder+` AND (p.id IS NULL OR p.title = '')
+		`, paperID).Scan(&count)
+	})
+	if err == nil {
+		c.putDetailCache(cacheKey, citationTTL, int(count))
+	}
 	return int(count), err
 }
 

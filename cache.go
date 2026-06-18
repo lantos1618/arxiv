@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -56,6 +58,13 @@ type Cache struct {
 	adminStatsRefreshMu sync.Mutex
 	cachedAdminStats    *AdminStats
 	adminStatsUpdated   time.Time
+
+	// Detail-page caches and guards keep expensive author/citation endpoints
+	// from consuming the whole Postgres pool under crawler or burst traffic.
+	detailLRU        *LRUCache
+	authorQuerySem   chan struct{}
+	citationQuerySem chan struct{}
+	detailFlights    singleflight.Group
 }
 
 // DBType returns the database type in use.
@@ -107,22 +116,51 @@ func Open(root string) (*Cache, error) {
 	// Configure connection pool for PostgreSQL
 	if dbType == DBTypePostgres {
 		sqlDB, _ := db.DB()
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(100)
+		maxOpen := envInt("ARXIV_DB_MAX_OPEN_CONNS", 30)
+		maxIdle := envInt("ARXIV_DB_MAX_IDLE_CONNS", 10)
+		if maxOpen < 1 {
+			maxOpen = 30
+		}
+		if maxIdle < 0 {
+			maxIdle = 0
+		}
+		if maxIdle > maxOpen {
+			maxIdle = maxOpen
+		}
+		sqlDB.SetMaxIdleConns(maxIdle)
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	}
 
 	// LRU cache size: with 15GB+ RAM, we can cache hundreds of thousands of papers
 	lruSize := 500000
 	c := &Cache{
-		root:     root,
-		db:       db,
-		dbType:   dbType,
-		paperLRU: NewLRUCache(lruSize),
+		root:             root,
+		db:               db,
+		dbType:           dbType,
+		paperLRU:         NewLRUCache(lruSize),
+		detailLRU:        NewLRUCache(envInt("ARXIV_DETAIL_CACHE_SIZE", 20000)),
+		authorQuerySem:   newSemaphore(envInt("ARXIV_AUTHOR_QUERY_CONCURRENCY", 4)),
+		citationQuerySem: newSemaphore(envInt("ARXIV_CITATION_QUERY_CONCURRENCY", 4)),
 	}
 	if err := c.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return c, nil
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("invalid %s=%q, using %d", name, value, fallback)
+		return fallback
+	}
+	return parsed
 }
 
 // Close closes the cache database.

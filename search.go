@@ -2,6 +2,7 @@ package arxiv
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -317,8 +318,34 @@ func (c *Cache) SearchByAuthor(ctx context.Context, author string, limit int) ([
 	if limit <= 0 {
 		limit = 100
 	}
+	cacheKey := detailKey("author_search", author, fmt.Sprint(limit))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if papers, ok := cached.([]Paper); ok {
+			return clonePapers(papers), nil
+		}
+	}
 
-	var papers []Paper
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if papers, ok := cached.([]Paper); ok {
+				return clonePapers(papers), nil
+			}
+		}
+		papers, err := c.searchByAuthorUncached(ctx, author, limit)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorSearchTTL, clonePapers(papers))
+		return papers, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	papers, _ := value.([]Paper)
+	return clonePapers(papers), nil
+}
+
+func (c *Cache) searchByAuthorUncached(ctx context.Context, author string, limit int) ([]Paper, error) {
 	// Use ILIKE for PostgreSQL, LIKE for SQLite (SQLite LIKE is case-insensitive by default)
 	likeOp := "LIKE"
 	if c.dbType == DBTypePostgres {
@@ -328,23 +355,25 @@ func (c *Cache) SearchByAuthor(ctx context.Context, author string, limit int) ([
 	// Search for both "First Last" and "Last, First" formats
 	flipped := flipAuthorName(author)
 
+	var papers []Paper
 	var err error
 	query := c.db.WithContext(ctx).
 		Model(&Paper{}).
 		Select("id, created, updated, title, authors, categories, pdf_downloaded, src_downloaded, fetched_at")
-	if flipped != "" {
-		err = query.
-			Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
-			Order("created DESC").
-			Limit(limit).
-			Find(&papers).Error
-	} else {
-		err = query.
+	err = c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return query.
+				Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
+				Order("created DESC").
+				Limit(limit).
+				Find(&papers).Error
+		}
+		return query.
 			Where("authors "+likeOp+" ?", "%"+author+"%").
 			Order("created DESC").
 			Limit(limit).
 			Find(&papers).Error
-	}
+	})
 	return papers, err
 }
 

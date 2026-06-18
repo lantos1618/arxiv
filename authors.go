@@ -86,7 +86,34 @@ func (c *Cache) GetCollaborators(ctx context.Context, author string, limit int) 
 	if limit <= 0 {
 		limit = 20
 	}
+	cacheKey := detailKey("author_collaborators", author, fmt.Sprint(limit))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if collabs, ok := cached.([]CollaboratorInfo); ok {
+			return cloneCollaborators(collabs), nil
+		}
+	}
 
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if collabs, ok := cached.([]CollaboratorInfo); ok {
+				return cloneCollaborators(collabs), nil
+			}
+		}
+		collabs, err := c.getCollaboratorsUncached(ctx, author, limit)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneCollaborators(collabs))
+		return collabs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	collabs, _ := value.([]CollaboratorInfo)
+	return cloneCollaborators(collabs), nil
+}
+
+func (c *Cache) getCollaboratorsUncached(ctx context.Context, author string, limit int) ([]CollaboratorInfo, error) {
 	// Compute collaborators directly from papers
 	likeOp := "LIKE"
 	if c.dbType == DBTypePostgres {
@@ -99,17 +126,18 @@ func (c *Cache) GetCollaborators(ctx context.Context, author string, limit int) 
 	// Get all papers by this author (try both name formats)
 	var papers []Paper
 	var err error
-	if flipped != "" {
-		err = c.db.WithContext(ctx).
-			Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
-			Select("id", "authors", "created").
-			Find(&papers).Error
-	} else {
-		err = c.db.WithContext(ctx).
+	err = c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).
+				Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
+				Select("id", "authors", "created").
+				Find(&papers).Error
+		}
+		return c.db.WithContext(ctx).
 			Where("authors "+likeOp+" ?", "%"+author+"%").
 			Select("id", "authors", "created").
 			Find(&papers).Error
-	}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("get author papers: %w", err)
 	}
@@ -391,6 +419,34 @@ type AuthorStats struct {
 
 // getAuthorPaperCount returns the number of papers by an author, searching both name formats.
 func (c *Cache) getAuthorPaperCount(ctx context.Context, author string) int64 {
+	cacheKey := detailKey("author_count", author)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if count, ok := cached.(int64); ok {
+			return count
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if count, ok := cached.(int64); ok {
+				return count, nil
+			}
+		}
+		count, err := c.getAuthorPaperCountUncached(ctx, author)
+		if err != nil {
+			return int64(0), err
+		}
+		c.putDetailCache(cacheKey, authorCountTTL, count)
+		return count, nil
+	})
+	if err != nil {
+		return 0
+	}
+	count, _ := value.(int64)
+	return count
+}
+
+func (c *Cache) getAuthorPaperCountUncached(ctx context.Context, author string) (int64, error) {
 	likeOp := "LIKE"
 	if c.dbType == DBTypePostgres {
 		likeOp = "ILIKE"
@@ -399,12 +455,13 @@ func (c *Cache) getAuthorPaperCount(ctx context.Context, author string) int64 {
 	flipped := flipAuthorName(author)
 
 	var count int64
-	if flipped != "" {
-		c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").Count(&count)
-	} else {
-		c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ?", "%"+author+"%").Count(&count)
-	}
-	return count
+	err := c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").Count(&count).Error
+		}
+		return c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ?", "%"+author+"%").Count(&count).Error
+	})
+	return count, err
 }
 
 // CountPapersByAuthor returns the number of cached papers by an author.
@@ -414,6 +471,34 @@ func (c *Cache) CountPapersByAuthor(ctx context.Context, author string) int64 {
 
 // GetAuthorStats returns statistics for an author.
 func (c *Cache) GetAuthorStats(ctx context.Context, author string) (*AuthorStats, error) {
+	cacheKey := detailKey("author_stats", author)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if stats, ok := cached.(*AuthorStats); ok {
+			return cloneAuthorStats(stats), nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if stats, ok := cached.(*AuthorStats); ok {
+				return cloneAuthorStats(stats), nil
+			}
+		}
+		stats, err := c.getAuthorStatsUncached(ctx, author)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorStatsTTL, cloneAuthorStats(stats))
+		return stats, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	stats, _ := value.(*AuthorStats)
+	return cloneAuthorStats(stats), nil
+}
+
+func (c *Cache) getAuthorStatsUncached(ctx context.Context, author string) (*AuthorStats, error) {
 	stats := &AuthorStats{}
 
 	// Count papers using helper that searches both name formats
@@ -459,7 +544,34 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 	if depth > 2 {
 		depth = 2
 	}
+	cacheKey := detailKey("author_graph", author, fmt.Sprint(depth))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if graph, ok := cached.(*AuthorGraph); ok {
+			return cloneAuthorGraph(graph), nil
+		}
+	}
 
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if graph, ok := cached.(*AuthorGraph); ok {
+				return cloneAuthorGraph(graph), nil
+			}
+		}
+		graph, err := c.getAuthorGraphUncached(ctx, author, depth)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneAuthorGraph(graph))
+		return graph, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	graph, _ := value.(*AuthorGraph)
+	return cloneAuthorGraph(graph), nil
+}
+
+func (c *Cache) getAuthorGraphUncached(ctx context.Context, author string, depth int) (*AuthorGraph, error) {
 	graph := &AuthorGraph{
 		Nodes: []CollabGraphNode{},
 		Edges: []CollabGraphEdge{},
@@ -490,11 +602,10 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 	for _, collab := range collabs {
 		// Add collaborator node
 		if !nodeSet[collab.Author] {
-			pc := c.getAuthorPaperCount(ctx, collab.Author)
 			graph.Nodes = append(graph.Nodes, CollabGraphNode{
 				ID:         collab.Author,
 				Name:       collab.Author,
-				PaperCount: int(pc),
+				PaperCount: collab.PaperCount,
 				IsCenter:   false,
 			})
 			nodeSet[collab.Author] = true
@@ -530,11 +641,10 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 
 				// Add node if new
 				if !nodeSet[collab.Author] {
-					pc := c.getAuthorPaperCount(ctx, collab.Author)
 					graph.Nodes = append(graph.Nodes, CollabGraphNode{
 						ID:         collab.Author,
 						Name:       collab.Author,
-						PaperCount: int(pc),
+						PaperCount: collab.PaperCount,
 						IsCenter:   false,
 					})
 					nodeSet[collab.Author] = true
@@ -585,6 +695,34 @@ type AuthorProfile struct {
 
 // GetAuthorProfile returns comprehensive profile for an author.
 func (c *Cache) GetAuthorProfile(ctx context.Context, author string) (*AuthorProfile, error) {
+	cacheKey := detailKey("author_profile", author)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if profile, ok := cached.(*AuthorProfile); ok {
+			return cloneAuthorProfile(profile), nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if profile, ok := cached.(*AuthorProfile); ok {
+				return cloneAuthorProfile(profile), nil
+			}
+		}
+		profile, err := c.getAuthorProfileUncached(ctx, author)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneAuthorProfile(profile))
+		return profile, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	profile, _ := value.(*AuthorProfile)
+	return cloneAuthorProfile(profile), nil
+}
+
+func (c *Cache) getAuthorProfileUncached(ctx context.Context, author string) (*AuthorProfile, error) {
 	profile := &AuthorProfile{
 		Name:          author,
 		ResearchAreas: []ResearchArea{},
@@ -601,18 +739,22 @@ func (c *Cache) GetAuthorProfile(ctx context.Context, author string) (*AuthorPro
 
 	// Get all papers by author
 	var papers []Paper
-	if flipped != "" {
-		c.db.WithContext(ctx).
-			Select("id", "categories", "created").
-			Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
-			Order("created ASC").
-			Find(&papers)
-	} else {
-		c.db.WithContext(ctx).
+	err := c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).
+				Select("id", "categories", "created").
+				Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
+				Order("created ASC").
+				Find(&papers).Error
+		}
+		return c.db.WithContext(ctx).
 			Select("id", "categories", "created").
 			Where("authors "+likeOp+" ?", "%"+author+"%").
 			Order("created ASC").
-			Find(&papers)
+			Find(&papers).Error
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	profile.TotalPapers = len(papers)
