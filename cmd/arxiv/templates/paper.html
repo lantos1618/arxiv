@@ -109,6 +109,8 @@
 
 		.nav { margin-bottom: 1.5rem; font-size: 0.875rem; min-height: 1.5rem; }
 		.nav a { margin-right: 1rem; }
+		.site-footer { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 0.78rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+		.site-footer-separator { color: #94a3b8; }
 		.meta { font-size: 0.875rem; color: #64748b; margin-bottom: 0.5rem; min-height: 1.5rem; }
 		.meta code { font-family: monospace; background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; }
 			.authors { margin-bottom: 0.5rem; }
@@ -1441,6 +1443,7 @@
 	{{end}}
 })();
 </script>
+{{template "build_footer" .}}
 </body>
 </html>
 {{end}}

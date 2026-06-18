@@ -16,7 +16,11 @@ services:
     restart: unless-stopped
 
   arxiv:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_DATE: ${BUILD_DATE:-}
+        BUILD_COMMIT: ${BUILD_COMMIT:-}
     container_name: arxiv-container
     user: "1000:1000"
     init: true

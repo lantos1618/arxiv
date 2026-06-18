@@ -1,11 +1,17 @@
 FROM golang:1.25-alpine AS builder
 WORKDIR /build
 ENV CGO_ENABLED=0
+ARG BUILD_DATE
+ARG BUILD_COMMIT
 
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go mod tidy && go build -o arxiv-server ./cmd/arxiv && go build -o arxiv-migrate ./cmd/migrate
+RUN go mod tidy \
+    && BUILD_DATE_VALUE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" \
+    && BUILD_COMMIT_VALUE="${BUILD_COMMIT:-unknown}" \
+    && go build -ldflags "-X main.buildDate=${BUILD_DATE_VALUE} -X main.buildCommit=${BUILD_COMMIT_VALUE}" -o arxiv-server ./cmd/arxiv \
+    && go build -o arxiv-migrate ./cmd/migrate
 
 FROM python:3.11-slim
 

@@ -259,6 +259,8 @@ func (s *server) renderTemplate(w http.ResponseWriter, r *http.Request, name str
 	if _, exists := data["CurrentUserIsAdmin"]; !exists {
 		data["CurrentUserIsAdmin"] = s.userIsAdmin(currentUser) || s.hasAdminAccess(r)
 	}
+	data["BuildDate"] = buildDateLabel()
+	data["BuildCommit"] = buildCommitLabel()
 	if err := templates.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("render template %s failed: %v", name, err)
 	}
