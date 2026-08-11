@@ -10,11 +10,32 @@ import (
 
 // ParseAuthors splits an author string into individual author names.
 func ParseAuthors(authors string) []string {
-	// Replace " and " with comma for consistent splitting
-	authors = strings.ReplaceAll(authors, " and ", ", ")
+	if strings.Contains(authors, " and ") {
+		return splitNonEmpty(authors, " and ")
+	}
+	parts := splitNonEmpty(authors, ",")
+	if len(parts) >= 2 && len(parts)%2 == 0 {
+		commaNames := true
+		for _, part := range parts {
+			if strings.ContainsAny(part, " \t") {
+				commaNames = false
+				break
+			}
+		}
+		if commaNames {
+			result := make([]string, 0, len(parts)/2)
+			for i := 0; i < len(parts); i += 2 {
+				result = append(result, parts[i]+", "+parts[i+1])
+			}
+			return result
+		}
+	}
+	return parts
+}
 
+func splitNonEmpty(value, separator string) []string {
 	var result []string
-	for _, a := range strings.Split(authors, ",") {
+	for _, a := range strings.Split(value, separator) {
 		a = strings.TrimSpace(a)
 		if a != "" {
 			result = append(result, a)
@@ -30,9 +51,9 @@ func normalizeAuthor(name string) string {
 
 // CollaboratorInfo contains information about a collaborator.
 type CollaboratorInfo struct {
-	Author     string    `json:"author"`
-	PaperCount int       `json:"paper_count"`
-	PaperIDs   []string  `json:"paper_ids"`
+	Author      string    `json:"author"`
+	PaperCount  int       `json:"paper_count"`
+	PaperIDs    []string  `json:"paper_ids"`
 	FirstCollab time.Time `json:"first_collab"`
 	LastCollab  time.Time `json:"last_collab"`
 }
@@ -86,7 +107,34 @@ func (c *Cache) GetCollaborators(ctx context.Context, author string, limit int) 
 	if limit <= 0 {
 		limit = 20
 	}
+	cacheKey := detailKey("author_collaborators", author, fmt.Sprint(limit))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if collabs, ok := cached.([]CollaboratorInfo); ok {
+			return cloneCollaborators(collabs), nil
+		}
+	}
 
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if collabs, ok := cached.([]CollaboratorInfo); ok {
+				return cloneCollaborators(collabs), nil
+			}
+		}
+		collabs, err := c.getCollaboratorsUncached(ctx, author, limit)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneCollaborators(collabs))
+		return collabs, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	collabs, _ := value.([]CollaboratorInfo)
+	return cloneCollaborators(collabs), nil
+}
+
+func (c *Cache) getCollaboratorsUncached(ctx context.Context, author string, limit int) ([]CollaboratorInfo, error) {
 	// Compute collaborators directly from papers
 	likeOp := "LIKE"
 	if c.dbType == DBTypePostgres {
@@ -99,17 +147,18 @@ func (c *Cache) GetCollaborators(ctx context.Context, author string, limit int) 
 	// Get all papers by this author (try both name formats)
 	var papers []Paper
 	var err error
-	if flipped != "" {
-		err = c.db.WithContext(ctx).
-			Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
-			Select("id", "authors", "created").
-			Find(&papers).Error
-	} else {
-		err = c.db.WithContext(ctx).
+	err = c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).
+				Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
+				Select("id", "authors", "created").
+				Find(&papers).Error
+		}
+		return c.db.WithContext(ctx).
 			Where("authors "+likeOp+" ?", "%"+author+"%").
 			Select("id", "authors", "created").
 			Find(&papers).Error
-	}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("get author papers: %w", err)
 	}
@@ -188,7 +237,7 @@ func (c *Cache) GetCollaborators(ctx context.Context, author string, limit int) 
 // GetSimilarAuthors finds authors with similar research interests using embedding similarity.
 func (c *Cache) GetSimilarAuthors(ctx context.Context, author string, limit int) ([]SimilarAuthor, error) {
 	if c.dbType != DBTypePostgres {
-		return nil, fmt.Errorf("similar authors requires PostgreSQL with pgvector")
+		return nil, c.capabilityError("similar authors")
 	}
 	if limit <= 0 {
 		limit = 10
@@ -196,9 +245,12 @@ func (c *Cache) GetSimilarAuthors(ctx context.Context, author string, limit int)
 
 	// Get the author's embedding
 	var authorEmbed AuthorEmbedding
-	err := c.db.WithContext(ctx).Where("author = ?", author).First(&authorEmbed).Error
-	if err != nil {
-		return nil, fmt.Errorf("author embedding not found: %w", err)
+	lookup := c.db.WithContext(ctx).Where("author = ?", author).Limit(1).Find(&authorEmbed)
+	if lookup.Error != nil {
+		return nil, fmt.Errorf("find author embedding: %w", lookup.Error)
+	}
+	if lookup.RowsAffected == 0 {
+		return []SimilarAuthor{}, nil
 	}
 
 	// Find similar authors using cosine similarity
@@ -207,7 +259,7 @@ func (c *Cache) GetSimilarAuthors(ctx context.Context, author string, limit int)
 		PaperCount int
 		Similarity float64
 	}
-	err = c.db.WithContext(ctx).Raw(`
+	err := c.db.WithContext(ctx).Raw(`
 		SELECT author, paper_count, 1 - (vector <=> (SELECT vector FROM author_embeddings WHERE author = ?)) AS similarity
 		FROM author_embeddings
 		WHERE author != ?
@@ -236,7 +288,9 @@ func (c *Cache) BuildAuthorGraph(ctx context.Context) error {
 	fmt.Println("Building author collaboration graph...")
 
 	// Clear existing collaborations
-	c.db.WithContext(ctx).Exec("DELETE FROM author_collaborations")
+	if err := c.db.WithContext(ctx).Exec("DELETE FROM author_collaborations").Error; err != nil {
+		return fmt.Errorf("clear author collaborations: %w", err)
+	}
 
 	// Process papers in batches
 	batchSize := 1000
@@ -279,9 +333,14 @@ func (c *Cache) BuildAuthorGraph(ctx context.Context) error {
 					if existing, ok := collabMap[key]; ok {
 						existing.PaperCount++
 						var paperIDs []string
-						json.Unmarshal([]byte(existing.PaperIDs), &paperIDs)
+						if err := json.Unmarshal([]byte(existing.PaperIDs), &paperIDs); err != nil {
+							return fmt.Errorf("decode collaboration paper IDs: %w", err)
+						}
 						paperIDs = append(paperIDs, paper.ID)
-						paperIDsJSON, _ := json.Marshal(paperIDs)
+						paperIDsJSON, err := json.Marshal(paperIDs)
+						if err != nil {
+							return fmt.Errorf("encode collaboration paper IDs: %w", err)
+						}
 						existing.PaperIDs = string(paperIDsJSON)
 						if paper.Created.Before(existing.FirstCollab) {
 							existing.FirstCollab = paper.Created
@@ -290,7 +349,10 @@ func (c *Cache) BuildAuthorGraph(ctx context.Context) error {
 							existing.LastCollab = paper.Created
 						}
 					} else {
-						paperIDs, _ := json.Marshal([]string{paper.ID})
+						paperIDs, err := json.Marshal([]string{paper.ID})
+						if err != nil {
+							return fmt.Errorf("encode collaboration paper ID: %w", err)
+						}
 						collabMap[key] = &AuthorCollaboration{
 							Author1:     a1,
 							Author2:     a2,
@@ -330,13 +392,14 @@ func (c *Cache) BuildAuthorGraph(ctx context.Context) error {
 	}
 
 	fmt.Println("Author collaboration graph built successfully")
+	c.detailLRU.Clear()
 	return nil
 }
 
-// BuildAuthorEmbeddings computes embeddings for all authors by averaging their paper embeddings.
+// BuildAuthorEmbeddings rebuilds the legacy MiniLM author index for migration workflows.
 func (c *Cache) BuildAuthorEmbeddings(ctx context.Context) error {
 	if c.dbType != DBTypePostgres {
-		return fmt.Errorf("author embeddings require PostgreSQL with pgvector")
+		return c.capabilityError("author embeddings")
 	}
 
 	fmt.Println("Building author embeddings...")
@@ -348,7 +411,7 @@ func (c *Cache) BuildAuthorEmbeddings(ctx context.Context) error {
 		SELECT
 			author,
 			count(*) as paper_count,
-			'all-MiniLM-L6-v2' as model,
+			? as model,
 			NOW() as updated,
 			AVG(e.vector) as vector
 		FROM (
@@ -363,34 +426,47 @@ func (c *Cache) BuildAuthorEmbeddings(ctx context.Context) error {
 			paper_count = EXCLUDED.paper_count,
 			updated = EXCLUDED.updated,
 			vector = EXCLUDED.vector
-	`).Error
+	`, MiniLMEmbeddingModel).Error
 	if err != nil {
 		return fmt.Errorf("build author embeddings: %w", err)
 	}
 
 	var count int64
-	c.db.WithContext(ctx).Model(&AuthorEmbedding{}).Count(&count)
+	if err := c.db.WithContext(ctx).Model(&AuthorEmbedding{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("count author embeddings: %w", err)
+	}
 	fmt.Printf("Built embeddings for %d authors\n", count)
+	c.detailLRU.Clear()
 
 	return nil
 }
 
 // HasAuthorEmbedding checks if an author has an embedding.
 func (c *Cache) HasAuthorEmbedding(ctx context.Context, author string) bool {
+	hasEmbedding, _ := c.HasAuthorEmbeddingResult(ctx, author)
+	return hasEmbedding
+}
+
+// HasAuthorEmbeddingResult reports both availability and database failures.
+func (c *Cache) HasAuthorEmbeddingResult(ctx context.Context, author string) (bool, error) {
+	if c.dbType != DBTypePostgres {
+		return false, nil
+	}
 	var count int64
-	c.db.WithContext(ctx).Model(&AuthorEmbedding{}).Where("author = ?", author).Count(&count)
-	return count > 0
+	if err := c.db.WithContext(ctx).Model(&AuthorEmbedding{}).Where("author = ?", author).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // AuthorStats returns statistics about an author.
 type AuthorStats struct {
-	PaperCount       int `json:"paper_count"`
-	CollaboratorCount int `json:"collaborator_count"`
-	HasEmbedding     bool `json:"has_embedding"`
+	PaperCount        int  `json:"paper_count"`
+	CollaboratorCount int  `json:"collaborator_count"`
+	HasEmbedding      bool `json:"has_embedding"`
 }
 
-// getAuthorPaperCount returns the number of papers by an author, searching both name formats.
-func (c *Cache) getAuthorPaperCount(ctx context.Context, author string) int64 {
+func (c *Cache) getAuthorPaperCountUncached(ctx context.Context, author string) (int64, error) {
 	likeOp := "LIKE"
 	if c.dbType == DBTypePostgres {
 		likeOp = "ILIKE"
@@ -399,28 +475,75 @@ func (c *Cache) getAuthorPaperCount(ctx context.Context, author string) int64 {
 	flipped := flipAuthorName(author)
 
 	var count int64
-	if flipped != "" {
-		c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").Count(&count)
-	} else {
-		c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ?", "%"+author+"%").Count(&count)
-	}
+	err := c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").Count(&count).Error
+		}
+		return c.db.WithContext(ctx).Model(&Paper{}).Where("authors "+likeOp+" ?", "%"+author+"%").Count(&count).Error
+	})
+	return count, err
+}
+
+// CountPapersByAuthor returns the number of cached papers by an author.
+func (c *Cache) CountPapersByAuthor(ctx context.Context, author string) int64 {
+	count, _ := c.CountPapersByAuthorResult(ctx, author)
 	return count
+}
+
+// CountPapersByAuthorResult returns an exact count and preserves query errors.
+func (c *Cache) CountPapersByAuthorResult(ctx context.Context, author string) (int64, error) {
+	return c.getAuthorPaperCountUncached(ctx, author)
 }
 
 // GetAuthorStats returns statistics for an author.
 func (c *Cache) GetAuthorStats(ctx context.Context, author string) (*AuthorStats, error) {
+	cacheKey := detailKey("author_stats", author)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if stats, ok := cached.(*AuthorStats); ok {
+			return cloneAuthorStats(stats), nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if stats, ok := cached.(*AuthorStats); ok {
+				return cloneAuthorStats(stats), nil
+			}
+		}
+		stats, err := c.getAuthorStatsUncached(ctx, author)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorStatsTTL, cloneAuthorStats(stats))
+		return stats, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	stats, _ := value.(*AuthorStats)
+	return cloneAuthorStats(stats), nil
+}
+
+func (c *Cache) getAuthorStatsUncached(ctx context.Context, author string) (*AuthorStats, error) {
 	stats := &AuthorStats{}
 
 	// Count papers using helper that searches both name formats
-	stats.PaperCount = int(c.getAuthorPaperCount(ctx, author))
+	paperCount, err := c.getAuthorPaperCountUncached(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("count author papers: %w", err)
+	}
+	stats.PaperCount = int(paperCount)
 
-	// Count unique collaborators
-	var collabCount int64
-	c.db.WithContext(ctx).Model(&AuthorCollaboration{}).Where("author1 = ? OR author2 = ?", author, author).Count(&collabCount)
-	stats.CollaboratorCount = int(collabCount)
+	collaboratorCount, err := c.countAuthorCollaborators(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("count author collaborators: %w", err)
+	}
+	stats.CollaboratorCount = collaboratorCount
 
-	// Check embedding
-	stats.HasEmbedding = c.HasAuthorEmbedding(ctx, author)
+	stats.HasEmbedding, err = c.HasAuthorEmbeddingResult(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("check author embedding: %w", err)
+	}
 
 	return stats, nil
 }
@@ -435,9 +558,9 @@ type CollabGraphNode struct {
 
 // CollabGraphEdge represents an edge in the collaboration graph.
 type CollabGraphEdge struct {
-	Source     string `json:"source"`
-	Target     string `json:"target"`
-	Weight     int    `json:"weight"` // number of papers together
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Weight int    `json:"weight"` // number of papers together
 }
 
 // AuthorGraph contains the collaboration network for visualization.
@@ -454,7 +577,34 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 	if depth > 2 {
 		depth = 2
 	}
+	cacheKey := detailKey("author_graph", author, fmt.Sprint(depth))
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if graph, ok := cached.(*AuthorGraph); ok {
+			return cloneAuthorGraph(graph), nil
+		}
+	}
 
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if graph, ok := cached.(*AuthorGraph); ok {
+				return cloneAuthorGraph(graph), nil
+			}
+		}
+		graph, err := c.getAuthorGraphUncached(ctx, author, depth)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneAuthorGraph(graph))
+		return graph, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	graph, _ := value.(*AuthorGraph)
+	return cloneAuthorGraph(graph), nil
+}
+
+func (c *Cache) getAuthorGraphUncached(ctx context.Context, author string, depth int) (*AuthorGraph, error) {
 	graph := &AuthorGraph{
 		Nodes: []CollabGraphNode{},
 		Edges: []CollabGraphEdge{},
@@ -465,7 +615,10 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 	edgeSet := make(map[string]bool)
 
 	// Get center author's paper count using helper that searches both name formats
-	centerPaperCount := c.getAuthorPaperCount(ctx, author)
+	centerPaperCount, err := c.getAuthorPaperCountUncached(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("count center author papers: %w", err)
+	}
 
 	// Add center node
 	graph.Nodes = append(graph.Nodes, CollabGraphNode{
@@ -479,17 +632,20 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 	// Get first level collaborators
 	collabs, err := c.GetCollaborators(ctx, author, 15)
 	if err != nil {
-		return graph, nil // Return partial graph
+		return nil, fmt.Errorf("get center collaborators: %w", err)
 	}
 
 	for _, collab := range collabs {
+		collaboratorPaperCount, err := c.getAuthorPaperCountUncached(ctx, collab.Author)
+		if err != nil {
+			return nil, fmt.Errorf("count collaborator papers for %s: %w", collab.Author, err)
+		}
 		// Add collaborator node
 		if !nodeSet[collab.Author] {
-			pc := c.getAuthorPaperCount(ctx, collab.Author)
 			graph.Nodes = append(graph.Nodes, CollabGraphNode{
 				ID:         collab.Author,
 				Name:       collab.Author,
-				PaperCount: int(pc),
+				PaperCount: int(collaboratorPaperCount),
 				IsCenter:   false,
 			})
 			nodeSet[collab.Author] = true
@@ -516,7 +672,10 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 		}
 
 		for _, firstLevel := range firstLevelAuthors {
-			secondCollabs, _ := c.GetCollaborators(ctx, firstLevel, 5)
+			secondCollabs, err := c.GetCollaborators(ctx, firstLevel, 5)
+			if err != nil {
+				return nil, fmt.Errorf("get second-level collaborators for %s: %w", firstLevel, err)
+			}
 			for _, collab := range secondCollabs {
 				// Skip if it's the center author
 				if collab.Author == author {
@@ -525,11 +684,14 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 
 				// Add node if new
 				if !nodeSet[collab.Author] {
-					pc := c.getAuthorPaperCount(ctx, collab.Author)
+					paperCount, err := c.getAuthorPaperCountUncached(ctx, collab.Author)
+					if err != nil {
+						return nil, fmt.Errorf("count second-level author papers for %s: %w", collab.Author, err)
+					}
 					graph.Nodes = append(graph.Nodes, CollabGraphNode{
 						ID:         collab.Author,
 						Name:       collab.Author,
-						PaperCount: int(pc),
+						PaperCount: int(paperCount),
 						IsCenter:   false,
 					})
 					nodeSet[collab.Author] = true
@@ -555,8 +717,8 @@ func (c *Cache) GetAuthorGraph(ctx context.Context, author string, depth int) (*
 
 // ResearchArea represents a research area with paper count.
 type ResearchArea struct {
-	Category   string `json:"category"`
-	PaperCount int    `json:"paper_count"`
+	Category   string  `json:"category"`
+	PaperCount int     `json:"paper_count"`
 	Percentage float64 `json:"percentage"`
 }
 
@@ -568,18 +730,46 @@ type YearlyOutput struct {
 
 // AuthorProfile contains comprehensive profile information.
 type AuthorProfile struct {
-	Name            string         `json:"name"`
-	TotalPapers     int            `json:"total_papers"`
-	TotalCollaborators int         `json:"total_collaborators"`
-	ResearchAreas   []ResearchArea `json:"research_areas"`
-	YearlyOutput    []YearlyOutput `json:"yearly_output"`
-	FirstPaper      *time.Time     `json:"first_paper"`
-	LastPaper       *time.Time     `json:"last_paper"`
-	HasEmbedding    bool           `json:"has_embedding"`
+	Name               string         `json:"name"`
+	TotalPapers        int            `json:"total_papers"`
+	TotalCollaborators int            `json:"total_collaborators"`
+	ResearchAreas      []ResearchArea `json:"research_areas"`
+	YearlyOutput       []YearlyOutput `json:"yearly_output"`
+	FirstPaper         *time.Time     `json:"first_paper"`
+	LastPaper          *time.Time     `json:"last_paper"`
+	HasEmbedding       bool           `json:"has_embedding"`
 }
 
 // GetAuthorProfile returns comprehensive profile for an author.
 func (c *Cache) GetAuthorProfile(ctx context.Context, author string) (*AuthorProfile, error) {
+	cacheKey := detailKey("author_profile", author)
+	if cached, ok := c.getDetailCache(cacheKey); ok {
+		if profile, ok := cached.(*AuthorProfile); ok {
+			return cloneAuthorProfile(profile), nil
+		}
+	}
+
+	value, err, _ := c.detailFlights.Do(cacheKey, func() (interface{}, error) {
+		if cached, ok := c.getDetailCache(cacheKey); ok {
+			if profile, ok := cached.(*AuthorProfile); ok {
+				return cloneAuthorProfile(profile), nil
+			}
+		}
+		profile, err := c.getAuthorProfileUncached(ctx, author)
+		if err != nil {
+			return nil, err
+		}
+		c.putDetailCache(cacheKey, authorProfileTTL, cloneAuthorProfile(profile))
+		return profile, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	profile, _ := value.(*AuthorProfile)
+	return cloneAuthorProfile(profile), nil
+}
+
+func (c *Cache) getAuthorProfileUncached(ctx context.Context, author string) (*AuthorProfile, error) {
 	profile := &AuthorProfile{
 		Name:          author,
 		ResearchAreas: []ResearchArea{},
@@ -596,18 +786,22 @@ func (c *Cache) GetAuthorProfile(ctx context.Context, author string) (*AuthorPro
 
 	// Get all papers by author
 	var papers []Paper
-	if flipped != "" {
-		c.db.WithContext(ctx).
-			Select("id", "categories", "created").
-			Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
-			Order("created ASC").
-			Find(&papers)
-	} else {
-		c.db.WithContext(ctx).
+	err := c.withAuthorQuery(ctx, func() error {
+		if flipped != "" {
+			return c.db.WithContext(ctx).
+				Select("id", "categories", "created").
+				Where("authors "+likeOp+" ? OR authors "+likeOp+" ?", "%"+author+"%", "%"+flipped+"%").
+				Order("created ASC").
+				Find(&papers).Error
+		}
+		return c.db.WithContext(ctx).
 			Select("id", "categories", "created").
 			Where("authors "+likeOp+" ?", "%"+author+"%").
 			Order("created ASC").
-			Find(&papers)
+			Find(&papers).Error
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	profile.TotalPapers = len(papers)
@@ -686,13 +880,23 @@ func (c *Cache) GetAuthorProfile(ctx context.Context, author string) (*AuthorPro
 		})
 	}
 
-	// Get collaborator count
-	var collabCount int64
-	c.db.WithContext(ctx).Model(&AuthorCollaboration{}).Where("author1 = ? OR author2 = ?", author, author).Count(&collabCount)
-	profile.TotalCollaborators = int(collabCount)
+	profile.TotalCollaborators, err = c.countAuthorCollaborators(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("count author collaborators: %w", err)
+	}
 
-	// Check embedding
-	profile.HasEmbedding = c.HasAuthorEmbedding(ctx, author)
+	profile.HasEmbedding, err = c.HasAuthorEmbeddingResult(ctx, author)
+	if err != nil {
+		return nil, fmt.Errorf("check author embedding: %w", err)
+	}
 
 	return profile, nil
+}
+
+func (c *Cache) countAuthorCollaborators(ctx context.Context, author string) (int, error) {
+	collaborators, err := c.getCollaboratorsUncached(ctx, author, int(^uint(0)>>1))
+	if err != nil {
+		return 0, err
+	}
+	return len(collaborators), nil
 }

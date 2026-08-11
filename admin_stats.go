@@ -14,10 +14,15 @@ type AdminStats struct {
 	Cache          CacheStats
 	Embeddings     AdminEmbeddingStats
 	Users          AdminUserStats
-	EmbeddingJobs  map[string]int64
 	RecentUsers    []AdminUserRow
 	RecentViews    []UserPaperViewRow
 	RecentAuditLog []AdminAuditRow
+	Availability   map[string]MetricAvailability
+}
+
+type MetricAvailability struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 const (
@@ -27,7 +32,18 @@ const (
 )
 
 type AdminEmbeddingStats struct {
-	MiniLMAbstracts          int64
+	MetadataComplete          int64
+	QwenAbstractEmbeddings    int64
+	PapersWithPDFText         int64
+	PapersWithPDFChunks       int64
+	PDFChunks                 int64
+	PDFChunkEmbeddings        int64
+	MissingPDFText            int64
+	MissingPDFChunks          int64
+	MissingPDFChunkEmbeddings int64
+
+	// Deprecated aliases retained while admin templates migrate to the precise
+	// metric names above.
 	QwenAbstracts            int64
 	FullAbstracts            int64
 	MissingAbstractText      int64
@@ -38,21 +54,22 @@ type AdminEmbeddingStats struct {
 	FullPaperChunked         int64
 	FullPaperChunks          int64
 	FullPaperEmbeddings      int64
-	PendingMiniLM            int64
 	PendingQwenAbstract      int64
 	PendingFullPaperText     int64
 	PendingFullPaper         int64
 }
 
 type AdminUserStats struct {
-	TotalUsers     int64
-	New24h         int64
-	New7d          int64
-	New30d         int64
-	Active24h      int64
-	Active7d       int64
-	Active30d      int64
-	FreeUsers      int64
+	TotalUsers int64
+	New24h     int64
+	New7d      int64
+	New30d     int64
+	Active24h  int64
+	Active7d   int64
+	Active30d  int64
+	FreeUsers  int64
+	// PaidUsers counts only the literal stored plan label. It does not imply a
+	// paid lifecycle, subscription, or billing record.
 	PaidUsers      int64
 	UnsetPlanUsers int64
 	PaperViews     int64
@@ -81,8 +98,7 @@ type AdminAuditRow struct {
 	CreatedAt  time.Time
 }
 
-// AdminStats returns real dashboard numbers from the database. Anything not
-// represented here should be shown by the UI as a placeholder, not invented.
+// AdminStats returns dashboard numbers sourced from the application database.
 func (c *Cache) AdminStats(ctx context.Context) (*AdminStats, error) {
 	c.adminStatsMu.RLock()
 	if c.cachedAdminStats != nil && time.Since(c.adminStatsUpdated) < adminStatsTTL {
@@ -100,7 +116,9 @@ func (c *Cache) AdminStats(ctx context.Context) (*AdminStats, error) {
 		if c.adminStatsRefreshMu.TryLock() {
 			go func() {
 				defer c.adminStatsRefreshMu.Unlock()
-				if _, err := c.refreshAdminStatsLocked(context.Background()); err != nil {
+				refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				defer cancel()
+				if _, err := c.refreshAdminStatsLocked(refreshCtx); err != nil {
 					fmt.Printf("admin stats background refresh failed: %v\n", err)
 				}
 			}()
@@ -130,22 +148,17 @@ func (c *Cache) refreshAdminStatsLocked(ctx context.Context) (*AdminStats, error
 	}
 
 	stats := &AdminStats{
-		GeneratedAt:   now,
-		DBType:        c.dbType,
-		Cache:         *cacheStats,
-		EmbeddingJobs: map[string]int64{},
+		GeneratedAt:  now,
+		DBType:       c.dbType,
+		Cache:        *cacheStats,
+		Availability: map[string]MetricAvailability{},
 	}
 
-	if err := c.countEmbeddingsForAdmin(ctx, &stats.Embeddings, cacheStats.TotalPapers); err != nil {
+	if err := c.countEmbeddingsForAdmin(ctx, &stats.Embeddings, cacheStats.TotalPapers, stats.Availability); err != nil {
 		return nil, err
 	}
-	if err := c.countUsersForAdmin(ctx, &stats.Users, now); err != nil {
+	if err := c.countUsersForAdmin(ctx, &stats.Users, now, stats.Availability); err != nil {
 		return nil, err
-	}
-	if jobs, err := c.EmbeddingJobStats(ctx); err != nil {
-		return nil, err
-	} else {
-		stats.EmbeddingJobs = jobs
 	}
 	recentUsers, err := c.RecentAdminUsers(ctx, 50)
 	if err != nil {
@@ -178,7 +191,9 @@ func (c *Cache) StartAdminStatsRefresh(ctx context.Context) {
 	go func() {
 		c.adminStatsRefreshMu.Lock()
 		defer c.adminStatsRefreshMu.Unlock()
-		if _, err := c.refreshAdminStatsLocked(context.Background()); err != nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if _, err := c.refreshAdminStatsLocked(refreshCtx); err != nil {
 			fmt.Printf("admin stats warm refresh failed: %v\n", err)
 		}
 	}()
@@ -194,7 +209,10 @@ func (c *Cache) StartAdminStatsRefresh(ctx context.Context) {
 				if !c.adminStatsRefreshMu.TryLock() {
 					continue
 				}
-				if _, err := c.refreshAdminStatsLocked(context.Background()); err != nil {
+				refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, err := c.refreshAdminStatsLocked(refreshCtx)
+				cancel()
+				if err != nil {
 					fmt.Printf("admin stats background refresh failed: %v\n", err)
 				}
 				c.adminStatsRefreshMu.Unlock()
@@ -208,10 +226,10 @@ func cloneAdminStats(stats *AdminStats) *AdminStats {
 		return nil
 	}
 	clone := *stats
-	if stats.EmbeddingJobs != nil {
-		clone.EmbeddingJobs = make(map[string]int64, len(stats.EmbeddingJobs))
-		for status, count := range stats.EmbeddingJobs {
-			clone.EmbeddingJobs[status] = count
+	if stats.Availability != nil {
+		clone.Availability = make(map[string]MetricAvailability, len(stats.Availability))
+		for metric, availability := range stats.Availability {
+			clone.Availability[metric] = availability
 		}
 	}
 	clone.RecentUsers = append([]AdminUserRow(nil), stats.RecentUsers...)
@@ -220,31 +238,38 @@ func cloneAdminStats(stats *AdminStats) *AdminStats {
 	return &clone
 }
 
-func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbeddingStats, totalPapers int64) error {
+func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbeddingStats, totalPapers int64, availability map[string]MetricAvailability) error {
 	if err := c.db.WithContext(ctx).Model(&Paper{}).
 		Where("title IS NULL OR title = '' OR abstract IS NULL OR abstract = ''").
 		Count(&out.MissingAbstractText).Error; err != nil {
 		return err
 	}
 	out.FullAbstracts = maxInt64(totalPapers-out.MissingAbstractText, 0)
+	out.MetadataComplete = out.FullAbstracts
 
-	if err := c.db.WithContext(ctx).Model(&Embedding{}).Count(&out.MiniLMAbstracts).Error; err != nil {
-		return err
+	if c.dbType == DBTypePostgres {
+		if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+			Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", adminQwenModel, adminQwenDim).
+			Count(&out.QwenAbstracts).Error; err != nil {
+			return err
+		}
 	}
-	if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
-		Where("scope = ? AND model = ? AND dim = ?", "abstract", adminQwenModel, adminQwenDim).
-		Count(&out.QwenAbstracts).Error; err != nil {
-		return err
-	}
+	out.QwenAbstractEmbeddings = out.QwenAbstracts
+	setMetricAvailability(availability, "qwen_abstract_embeddings", c.dbType == DBTypePostgres, "requires PostgreSQL with pgvector")
 	if err := c.db.WithContext(ctx).Model(&Paper{}).
 		Where("pdf_text IS NOT NULL AND length(pdf_text) > 0").
 		Count(&out.FullPaperTexts).Error; err != nil {
 		return err
 	}
 	out.PendingFullPaperFetch = maxInt64(totalPapers-out.FullPaperTexts, 0)
-	if err := c.countFullPaperFetchStatus(ctx, &out.FullPaperFetchProcessing, &out.FullPaperFetchFailed); err != nil {
+	out.PapersWithPDFText = out.FullPaperTexts
+	out.MissingPDFText = out.PendingFullPaperFetch
+	fetchStatusAvailable, err := c.countFullPaperFetchStatus(ctx, &out.FullPaperFetchProcessing, &out.FullPaperFetchFailed)
+	if err != nil {
 		return err
 	}
+	setMetricAvailability(availability, "full_paper_fetch_status", fetchStatusAvailable, "status table is not installed")
+	out.PendingFullPaperFetch = maxInt64(out.MissingPDFText-out.FullPaperFetchProcessing-out.FullPaperFetchFailed, 0)
 	if err := c.db.WithContext(ctx).Model(&PaperChunk{}).
 		Where("scope = ?", "pdf_text").
 		Distinct("paper_id").
@@ -262,38 +287,52 @@ func (c *Cache) countEmbeddingsForAdmin(ctx context.Context, out *AdminEmbedding
 	if err := c.countPendingFullPaperEmbeddings(ctx, &out.PendingFullPaper); err != nil {
 		return err
 	}
-	out.PendingMiniLM = maxInt64(out.FullAbstracts-out.MiniLMAbstracts, 0)
 	out.PendingQwenAbstract = maxInt64(out.FullAbstracts-out.QwenAbstracts, 0)
 	out.PendingFullPaperText = maxInt64(out.FullPaperTexts-out.FullPaperChunked, 0)
+	out.PapersWithPDFChunks = out.FullPaperChunked
+	out.PDFChunks = out.FullPaperChunks
+	out.PDFChunkEmbeddings = out.FullPaperEmbeddings
+	out.MissingPDFChunks = out.PendingFullPaperText
+	out.MissingPDFChunkEmbeddings = out.PendingFullPaper
+	setMetricAvailability(availability, "pdf_chunk_embeddings", c.dbType == DBTypePostgres, "requires PostgreSQL with pgvector")
 	return nil
 }
 
-func (c *Cache) countFullPaperFetchStatus(ctx context.Context, processing, failed *int64) error {
+func setMetricAvailability(availability map[string]MetricAvailability, metric string, available bool, reason string) {
+	if available {
+		reason = ""
+	}
+	availability[metric] = MetricAvailability{Available: available, Reason: reason}
+}
+
+func (c *Cache) countFullPaperFetchStatus(ctx context.Context, processing, failed *int64) (bool, error) {
 	if c.dbType != DBTypePostgres {
 		*processing = 0
 		*failed = 0
-		return nil
+		return false, nil
 	}
 	sqlDB, err := c.db.DB()
 	if err != nil {
-		return err
+		return false, err
 	}
 	var tableName *string
 	if err := sqlDB.QueryRowContext(ctx, `SELECT to_regclass('public.full_paper_fetch_status')`).Scan(&tableName); err != nil {
-		return err
+		return false, err
 	}
 	if tableName == nil {
 		*processing = 0
 		*failed = 0
-		return nil
+		return false, nil
 	}
 	row := sqlDB.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status = 'processing'),
 			count(*) FILTER (WHERE status = 'failed')
-		FROM full_paper_fetch_status
+		FROM full_paper_fetch_status s
+		JOIN papers p ON p.id = s.paper_id
+		WHERE COALESCE(p.pdf_text, '') = ''
 	`)
-	return row.Scan(processing, failed)
+	return true, row.Scan(processing, failed)
 }
 
 func (c *Cache) countFullPaperEmbeddings(ctx context.Context, total *int64) error {
@@ -344,7 +383,9 @@ func (c *Cache) countPendingFullPaperEmbeddings(ctx context.Context, pending *in
 	return row.Scan(pending)
 }
 
-func (c *Cache) countUsersForAdmin(ctx context.Context, out *AdminUserStats, now time.Time) error {
+func (c *Cache) countUsersForAdmin(ctx context.Context, out *AdminUserStats, now time.Time, availability map[string]MetricAvailability) error {
+	// A stored plan label is not evidence of a paid lifecycle.
+	setMetricAvailability(availability, "paid_user_lifecycle", false, "no billing or subscription source of truth")
 	if err := c.db.WithContext(ctx).Model(&User{}).Count(&out.TotalUsers).Error; err != nil {
 		return err
 	}
@@ -410,34 +451,22 @@ func (c *Cache) RecentAdminUsers(ctx context.Context, limit int) ([]AdminUserRow
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	var users []User
-	if err := c.db.WithContext(ctx).Order("created_at DESC").Limit(limit).Find(&users).Error; err != nil {
+	var rows []AdminUserRow
+	if err := c.db.WithContext(ctx).Raw(`
+		SELECT u.id, u.email, u.name, u.plan, u.auth_provider AS provider,
+		       u.email_verified AS verified, u.created_at, u.last_login_at,
+		       (SELECT MAX(s.last_seen_at) FROM user_sessions s WHERE s.user_id = u.id) AS last_seen_at
+		FROM users u
+		ORDER BY u.created_at DESC
+		LIMIT ?
+	`, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-
-	rows := make([]AdminUserRow, 0, len(users))
-	for _, user := range users {
-		var lastSeen *time.Time
-		var session UserSession
-		err := c.db.WithContext(ctx).
-			Where("user_id = ?", user.ID).
-			Order("last_seen_at DESC").
-			Limit(1).
-			First(&session).Error
-		if err == nil {
-			lastSeen = &session.LastSeenAt
+	for i := range rows {
+		rows[i].Plan = strings.TrimSpace(rows[i].Plan)
+		if rows[i].Plan == "" {
+			rows[i].Plan = "unset"
 		}
-		rows = append(rows, AdminUserRow{
-			ID:          user.ID,
-			Email:       user.Email,
-			Name:        user.Name,
-			Plan:        normalizedPlan(user.Plan),
-			Provider:    user.AuthProvider,
-			Verified:    user.EmailVerified,
-			CreatedAt:   user.CreatedAt,
-			LastLoginAt: user.LastLoginAt,
-			LastSeenAt:  lastSeen,
-		})
 	}
 	return rows, nil
 }
@@ -482,18 +511,6 @@ func (c *Cache) RecordAdminAudit(ctx context.Context, adminEmail, action, target
 		return fmt.Errorf("audit action is required")
 	}
 	return c.db.WithContext(ctx).Create(log).Error
-}
-
-func normalizedPlan(plan string) string {
-	plan = strings.ToLower(strings.TrimSpace(plan))
-	switch plan {
-	case "paid":
-		return "paid"
-	case "free":
-		return "free"
-	default:
-		return "free"
-	}
 }
 
 func maxInt64(a, b int64) int64 {

@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+)
 
-	"github.com/sajari/fuzzy"
+const (
+	maxPDFSearchPapers    = 2000
+	maxPDFSearchTextBytes = 2 * 1024 * 1024
+	maxPDFSearchScanBytes = 32 * 1024 * 1024
 )
 
 // ExtractPDFText extracts text from a PDF file using pdftotext.
@@ -42,9 +47,13 @@ func (c *Cache) EnsurePDFText(ctx context.Context, paperID string) (string, erro
 		return "", fmt.Errorf("PDF not downloaded for paper %s", paperID)
 	}
 
-	// Check if text is already cached
-	if paper.PDFText != "" {
-		return paper.PDFText, nil
+	var storedText string
+	if err := c.db.WithContext(ctx).Model(&Paper{}).
+		Select("pdf_text").Where("id = ?", paperID).Scan(&storedText).Error; err != nil {
+		return "", fmt.Errorf("load PDF text: %w", err)
+	}
+	if storedText != "" {
+		return storedText, nil
 	}
 
 	// Extract text from PDF
@@ -54,41 +63,44 @@ func (c *Cache) EnsurePDFText(ctx context.Context, paperID string) (string, erro
 	}
 
 	// Store in database
-	paper.PDFText = text
-	if err := c.db.WithContext(ctx).Model(paper).Update("pdf_text", text).Error; err != nil {
+	if err := c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", paperID).Update("pdf_text", text).Error; err != nil {
 		return "", fmt.Errorf("store PDF text: %w", err)
 	}
 
 	return text, nil
 }
 
-// SearchPDFs searches through PDF text content using fuzzy matching.
-// Supports both exact and fuzzy search (typo-tolerant).
+// SearchPDFs searches a bounded amount of cached PDF text. Fuzzy mode uses a
+// bounded edit-distance comparison at token boundaries; it is not semantic or
+// full-corpus search.
 // Returns paper IDs that match the query.
 func (c *Cache) SearchPDFs(ctx context.Context, query string, limit int, fuzzyMode bool) ([]PDFSearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if len(query) > 256 {
+		return nil, fmt.Errorf("PDF search query exceeds 256 bytes")
+	}
 	if limit <= 0 {
 		limit = 50
 	}
 
 	// Get all papers with PDFs downloaded
 	var papers []Paper
-	if err := c.db.WithContext(ctx).
-		Select("id", "pdf_path", "pdf_text").
-		Where("pdf_downloaded = ? AND pdf_path IS NOT NULL", true).
+	searchQuery := c.db.WithContext(ctx).
+		Select("id", "pdf_path", "substr(pdf_text, 1, ?) AS pdf_text", maxPDFSearchTextBytes).
+		Where("pdf_downloaded = ? AND pdf_path IS NOT NULL AND pdf_text IS NOT NULL AND pdf_text != ''", true)
+	if !fuzzyMode {
+		searchQuery = searchQuery.Where("LOWER(pdf_text) LIKE ?", "%"+strings.ToLower(query)+"%")
+	}
+	if err := searchQuery.Order("id").Limit(maxPDFSearchPapers).
 		Find(&papers).Error; err != nil {
 		return nil, err
 	}
 
 	var results []PDFSearchResult
 	lowerQuery := strings.ToLower(query)
-
-	// Build fuzzy model if fuzzy mode enabled
-	var model *fuzzy.Model
-	if fuzzyMode {
-		model = fuzzy.NewModel()
-		model.SetThreshold(1) // Allow 1 character difference
-		model.SetDepth(5)    // Search depth
-	}
 
 	// Search through cached text
 	type scoredResult struct {
@@ -97,49 +109,39 @@ func (c *Cache) SearchPDFs(ctx context.Context, query string, limit int, fuzzyMo
 	}
 	var scoredResults []scoredResult
 
+	scannedBytes := 0
 	for _, p := range papers {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if p.PDFText == "" {
 			continue
 		}
 
 		text := p.PDFText
+		if scannedBytes+len(text) > maxPDFSearchScanBytes {
+			remaining := maxPDFSearchScanBytes - scannedBytes
+			if remaining <= 0 {
+				break
+			}
+			text = text[:remaining]
+		}
+		scannedBytes += len(text)
 		lowerText := strings.ToLower(text)
 
 		var match bool
 		var score float64
 		var matchPos int = -1
 
-		if fuzzyMode && model != nil {
-			// Fuzzy search: find best match in text
-			words := strings.Fields(lowerText)
-			bestScore := 0.0
-			bestWord := ""
-			for _, word := range words {
-				if len(word) < 3 {
-					continue
-				}
-				s := model.SpellCheck(word)
-				if s != word {
-					// Check similarity
-					sim := similarity(word, lowerQuery)
-					if sim > bestScore {
-						bestScore = sim
-						bestWord = word
-					}
-				}
+		if fuzzyMode {
+			bestScore, bestPos, err := bestBoundedMatch(ctx, lowerText, lowerQuery)
+			if err != nil {
+				return nil, err
 			}
-			// Also check direct fuzzy match
-			directSim := fuzzyMatch(lowerText, lowerQuery)
-			if directSim > bestScore {
-				bestScore = directSim
-			}
-			if bestScore > 0.6 { // 60% similarity threshold
+			if bestScore >= 0.8 {
 				match = true
 				score = bestScore
-				matchPos = strings.Index(lowerText, bestWord)
-				if matchPos == -1 {
-					matchPos = strings.Index(lowerText, lowerQuery)
-				}
+				matchPos = bestPos
 			}
 		} else {
 			// Exact search (case-insensitive)
@@ -164,14 +166,7 @@ func (c *Cache) SearchPDFs(ctx context.Context, query string, limit int, fuzzyMo
 		}
 	}
 
-	// Sort by score (best matches first)
-	for i := 0; i < len(scoredResults)-1; i++ {
-		for j := i + 1; j < len(scoredResults); j++ {
-			if scoredResults[j].score > scoredResults[i].score {
-				scoredResults[i], scoredResults[j] = scoredResults[j], scoredResults[i]
-			}
-		}
-	}
+	sort.SliceStable(scoredResults, func(i, j int) bool { return scoredResults[i].score > scoredResults[j].score })
 
 	// Take top results
 	for i, sr := range scoredResults {
@@ -186,54 +181,96 @@ func (c *Cache) SearchPDFs(ctx context.Context, query string, limit int, fuzzyMo
 
 // fuzzyMatch calculates similarity between two strings (simple Levenshtein-like)
 func fuzzyMatch(text, query string) float64 {
+	score, _ := fuzzyMatchContext(context.Background(), text, query)
+	return score
+}
+
+func fuzzyMatchContext(ctx context.Context, text, query string) (float64, error) {
+	score, _, err := bestBoundedMatch(ctx, text, query)
+	return score, err
+}
+
+func bestBoundedMatch(ctx context.Context, text, query string) (float64, int, error) {
 	if len(query) == 0 {
-		return 0
+		return 0, -1, nil
 	}
 	if len(text) < len(query) {
-		return 0
+		return 0, -1, nil
+	}
+	if exact := strings.Index(text, query); exact >= 0 {
+		return 1, exact, nil
+	}
+	if len(query) < 4 {
+		return 0, -1, nil
 	}
 
-	// Check if query appears in text (allowing for small differences)
-	maxDist := len(query) / 3 // Allow 1/3 of query length as difference
+	maxDist := len(query) / 5
 	if maxDist < 1 {
 		maxDist = 1
 	}
 
 	bestMatch := 0.0
-	for i := 0; i <= len(text)-len(query); i++ {
-		substr := text[i : i+len(query)]
-		sim := similarity(substr, query)
-		if sim > bestMatch {
-			bestMatch = sim
+	bestPos := -1
+	for i := 0; i+len(query) <= len(text); {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, -1, err
+			}
 		}
+		if i == 0 || isPDFTokenBoundary(text[i-1]) {
+			distance := boundedLevenshtein(text[i:i+len(query)], query, maxDist)
+			if distance <= maxDist {
+				score := 1 - float64(distance)/float64(max(len(query), 1))
+				if score > bestMatch {
+					bestMatch = score
+					bestPos = i
+				}
+			}
+		}
+		i++
 	}
-
-	return bestMatch
+	return bestMatch, bestPos, nil
 }
 
-// similarity calculates simple similarity between two strings (0.0 to 1.0)
-func similarity(s1, s2 string) float64 {
-	if len(s1) == 0 && len(s2) == 0 {
-		return 1.0
-	}
-	if len(s1) == 0 || len(s2) == 0 {
-		return 0.0
-	}
+func isPDFTokenBoundary(b byte) bool {
+	return b == ' ' || b == '\n' || b == '\r' || b == '\t' || strings.ContainsRune(".,;:!?()[]{}\"'", rune(b))
+}
 
-	// Simple character overlap
-	matches := 0
-	minLen := len(s1)
-	if len(s2) < minLen {
-		minLen = len(s2)
+func boundedLevenshtein(a, b string, limit int) int {
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
 	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		rowMin := current[0]
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			current[j] = minInt(current[j-1]+1, previous[j]+1, previous[j-1]+cost)
+			if current[j] < rowMin {
+				rowMin = current[j]
+			}
+		}
+		if rowMin > limit {
+			return limit + 1
+		}
+		previous, current = current, previous
+	}
+	return previous[len(b)]
+}
 
-	for i := 0; i < minLen; i++ {
-		if s1[i] == s2[i] {
-			matches++
+func minInt(values ...int) int {
+	minimum := values[0]
+	for _, value := range values[1:] {
+		if value < minimum {
+			minimum = value
 		}
 	}
-
-	return float64(matches) / float64(max(len(s1), len(s2)))
+	return minimum
 }
 
 func max(a, b int) int {
@@ -242,7 +279,6 @@ func max(a, b int) int {
 	}
 	return b
 }
-
 
 // extractContext extracts text around a match for display.
 func extractContext(text, query string, contextLen int) string {
@@ -289,4 +325,3 @@ type PDFSearchResult struct {
 	Match   bool    `json:"match"`
 	Score   float64 `json:"score,omitempty"` // Match quality score (0.0 to 1.0)
 }
-

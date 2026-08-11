@@ -4,7 +4,10 @@
 --
 -- Run outside a transaction because REINDEX CONCURRENTLY requires it.
 
-ALTER INDEX IF EXISTS idx_papers_categories
-    SET (deduplicate_items = off);
+SELECT 'ALTER INDEX idx_papers_categories SET (deduplicate_items = off)'
+WHERE to_regclass('public.idx_papers_categories') IS NOT NULL
+\gexec
 
-REINDEX INDEX CONCURRENTLY idx_papers_categories;
+SELECT 'REINDEX INDEX CONCURRENTLY idx_papers_categories'
+WHERE to_regclass('public.idx_papers_categories') IS NOT NULL
+\gexec

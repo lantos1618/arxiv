@@ -2,6 +2,7 @@ package arxiv
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,89 @@ func TestLoginCodeCreatesUserAndSession(t *testing.T) {
 	}
 	if _, err := cache.UserForSessionToken(ctx, token); err != gorm.ErrRecordNotFound {
 		t.Fatalf("expected revoked session to be missing, got %v", err)
+	}
+}
+
+func TestUserAPIKeyLifecycle(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	cache, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer cache.Close()
+
+	ctx := context.Background()
+	user, err := cache.FindOrCreateUser(ctx, "agent@example.edu", "Agent Reader", "", true, "google", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("FindOrCreateUser: %v", err)
+	}
+
+	key, raw, created, err := cache.EnsureUserAPIKey(ctx, user.ID, "Agent access")
+	if err != nil {
+		t.Fatalf("EnsureUserAPIKey: %v", err)
+	}
+	if !created || raw == "" || key.KeyHash == raw {
+		t.Fatalf("expected one-time raw key and hashed storage, created=%v raw=%q key=%#v", created, raw, key)
+	}
+	if mask := MaskAPIKey(key); !strings.Contains(mask, "...") {
+		t.Fatalf("MaskAPIKey = %q, want masked value", mask)
+	}
+
+	sameKey, sameRaw, created, err := cache.EnsureUserAPIKey(ctx, user.ID, "Agent access")
+	if err != nil {
+		t.Fatalf("EnsureUserAPIKey existing: %v", err)
+	}
+	if created || sameRaw != "" || sameKey.ID != key.ID {
+		t.Fatalf("existing key should not reveal raw key again: created=%v raw=%q key=%#v", created, sameRaw, sameKey)
+	}
+
+	apiUser, usedKey, err := cache.UserForAPIKey(ctx, raw)
+	if err != nil {
+		t.Fatalf("UserForAPIKey: %v", err)
+	}
+	if apiUser.ID != user.ID || usedKey.ID != key.ID || usedKey.LastUsedAt == nil {
+		t.Fatalf("unexpected api auth result user=%#v key=%#v", apiUser, usedKey)
+	}
+
+	newKey, newRaw, err := cache.RegenerateUserAPIKey(ctx, user.ID, "Agent access")
+	if err != nil {
+		t.Fatalf("RegenerateUserAPIKey: %v", err)
+	}
+	if newRaw == "" || newKey.ID == key.ID {
+		t.Fatalf("expected fresh regenerated key, raw=%q key=%#v", newRaw, newKey)
+	}
+	if _, _, err := cache.UserForAPIKey(ctx, raw); err == nil {
+		t.Fatalf("old raw key still authenticates after regeneration")
+	}
+}
+
+func TestSQLiteStatsDoNotRequireQwenVectorColumn(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	cache, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer cache.Close()
+
+	ctx := context.Background()
+	stats, err := cache.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.QwenEmbeddingsCount != 0 {
+		t.Fatalf("QwenEmbeddingsCount = %d, want 0", stats.QwenEmbeddingsCount)
+	}
+	if cache.HasQwenEmbedding(ctx, "2601.00001") {
+		t.Fatal("SQLite cache unexpectedly reported a Qwen embedding")
+	}
+	ids, err := cache.GetQwenEmbeddingIDsFor(ctx, []string{"2601.00001"})
+	if err != nil {
+		t.Fatalf("GetQwenEmbeddingIDsFor: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("Qwen IDs = %#v, want empty", ids)
 	}
 }
 

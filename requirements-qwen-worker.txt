@@ -1,0 +1,6 @@
+sentence-transformers==5.7.0
+transformers==5.15.0
+accelerate==1.14.0
+huggingface-hub==1.27.0
+tokenizers==0.23.0rc0
+hf-xet==1.6.0

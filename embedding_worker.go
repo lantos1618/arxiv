@@ -11,13 +11,17 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// EmbeddingWorkerConfig configures the background embedding worker.
+// EmbeddingWorkerConfig configures the retired MiniLM background worker.
+// Deprecated: Qwen embedding jobs are the canonical runtime pipeline.
 type EmbeddingWorkerConfig struct {
 	// ServiceURL is the URL of the embedding service (e.g., "http://localhost:8001")
 	ServiceURL string
+	// MutationToken authorizes database-writing embedding service requests.
+	MutationToken string
 	// BatchSize is the number of papers to process in each batch
 	BatchSize int
 	// PollInterval is how often to check for new papers to embed
@@ -28,18 +32,20 @@ type EmbeddingWorkerConfig struct {
 	Enabled bool
 }
 
-// DefaultEmbeddingWorkerConfig returns sensible defaults.
+// DefaultEmbeddingWorkerConfig returns a disabled legacy configuration.
+// Deprecated: use the Qwen job pipeline.
 func DefaultEmbeddingWorkerConfig() EmbeddingWorkerConfig {
 	return EmbeddingWorkerConfig{
 		ServiceURL:   "http://localhost:8001",
 		BatchSize:    32,
 		PollInterval: 10 * time.Second,
 		MaxRetries:   3,
-		Enabled:      true,
+		Enabled:      false,
 	}
 }
 
-// EmbeddingWorker processes embedding jobs in the background.
+// EmbeddingWorker processes legacy MiniLM jobs when explicitly enabled.
+// Deprecated: retained for offline migration only.
 type EmbeddingWorker struct {
 	cache               *Cache
 	config              EmbeddingWorkerConfig
@@ -64,7 +70,43 @@ type EmbeddingWorkerStats struct {
 	ServiceUp bool      `json:"serviceUp"`
 }
 
-// NewEmbeddingWorker creates a new embedding worker.
+// QwenPipelineStats reports only the canonical Qwen profile and full-paper pipeline.
+type QwenPipelineStats struct {
+	AbstractProfiles         int64 `json:"abstractProfiles"`
+	FullPaperChunks          int64 `json:"fullPaperChunks"`
+	FullPaperChunkEmbeddings int64 `json:"fullPaperChunkEmbeddings"`
+}
+
+// QwenPipelineStats returns current Qwen coverage without consulting legacy MiniLM tables.
+func (c *Cache) QwenPipelineStats(ctx context.Context) (*QwenPipelineStats, error) {
+	if c == nil || c.db == nil {
+		return nil, fmt.Errorf("cache unavailable")
+	}
+	stats := &QwenPipelineStats{}
+	if c.dbType != DBTypePostgres {
+		return stats, nil
+	}
+	if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+		Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
+		Count(&stats.AbstractProfiles).Error; err != nil {
+		return nil, fmt.Errorf("count Qwen abstract profiles: %w", err)
+	}
+	if err := c.db.WithContext(ctx).Model(&PaperChunk{}).
+		Where("scope = ? AND COALESCE(text, '') <> ''", qwenPaperChunkScope).
+		Count(&stats.FullPaperChunks).Error; err != nil {
+		return nil, fmt.Errorf("count full-paper chunks: %w", err)
+	}
+	if err := c.db.WithContext(ctx).Table("chunk_embeddings_v2 AS e").
+		Joins("JOIN paper_chunks AS c ON c.id = e.chunk_id").
+		Where("c.scope = ? AND e.model = ? AND e.dim = ? AND e.vector IS NOT NULL AND e.source_hash = c.text_hash", qwenPaperChunkScope, qwenEmbeddingModel, qwenEmbeddingDim).
+		Count(&stats.FullPaperChunkEmbeddings).Error; err != nil {
+		return nil, fmt.Errorf("count current full-paper Qwen embeddings: %w", err)
+	}
+	return stats, nil
+}
+
+// NewEmbeddingWorker creates a legacy MiniLM worker.
+// Deprecated: retained for offline migration only.
 func NewEmbeddingWorker(cache *Cache, config EmbeddingWorkerConfig) *EmbeddingWorker {
 	return &EmbeddingWorker{
 		cache:  cache,
@@ -79,8 +121,18 @@ func NewEmbeddingWorker(cache *Cache, config EmbeddingWorkerConfig) *EmbeddingWo
 
 // Start begins the background worker.
 func (w *EmbeddingWorker) Start(ctx context.Context) {
+	if w == nil {
+		return
+	}
 	if !w.config.Enabled {
-		log.Println("Embedding worker disabled")
+		log.Println("Legacy MiniLM embedding worker disabled; Qwen is canonical")
+		return
+	}
+	if w.cache == nil {
+		w.mu.Lock()
+		w.stats.LastError = "legacy worker requires a cache"
+		w.mu.Unlock()
+		log.Println("Legacy MiniLM embedding worker not started: cache unavailable")
 		return
 	}
 
@@ -103,6 +155,9 @@ func (w *EmbeddingWorker) Start(ctx context.Context) {
 
 // Stop gracefully stops the worker.
 func (w *EmbeddingWorker) Stop() {
+	if w == nil {
+		return
+	}
 	w.mu.Lock()
 	if !w.running && !w.stopping {
 		w.mu.Unlock()
@@ -175,7 +230,7 @@ func (w *EmbeddingWorker) processBatch(ctx context.Context) bool {
 	w.stats.LastRun = time.Now()
 	w.mu.Unlock()
 
-	// Get papers without embeddings
+	// Claim queued papers in priority order.
 	papers, err := w.getPendingPapers(ctx, w.config.BatchSize)
 	if err != nil {
 		log.Printf("Error getting pending papers: %v", err)
@@ -199,7 +254,8 @@ func (w *EmbeddingWorker) processBatch(ctx context.Context) bool {
 	w.mu.Unlock()
 
 	// Send to embedding service
-	success, failed := w.embedPapers(ctx, papers)
+	reportedSuccess, reportedFailed := w.embedPapers(ctx, papers)
+	success, failed := w.finishEmbeddingJobs(ctx, papers, reportedSuccess, reportedFailed)
 
 	w.mu.Lock()
 	w.stats.Processed += int64(success)
@@ -271,31 +327,83 @@ func (w *EmbeddingWorker) checkServiceHealth() bool {
 
 // getPendingPapers gets papers that need embeddings.
 func (w *EmbeddingWorker) getPendingPapers(ctx context.Context, limit int) ([]Paper, error) {
+	if w == nil || w.cache == nil {
+		return nil, fmt.Errorf("legacy embedding worker cache unavailable")
+	}
 	var papers []Paper
-
-	// Get only the columns needed by the embedding service.
-	err := w.cache.db.WithContext(ctx).
-		Raw(`
-			SELECT p.id, p.title, p.abstract FROM papers p
-			WHERE p.title != '' AND p.abstract != ''
-			AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.paper_id = p.id)
-			ORDER BY p.id DESC
-			LIMIT ?
-		`, limit).
-		Scan(&papers).Error
-
+	err := w.cache.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		staleBefore := time.Now().Add(-10 * time.Minute)
+		if err := tx.Model(&EmbeddingJob{}).
+			Where("status = ? AND updated_at < ?", EmbeddingJobProcessing, staleBefore).
+			Updates(map[string]any{"status": EmbeddingJobFailed, "last_error": "legacy worker lease expired"}).Error; err != nil {
+			return err
+		}
+		retryBefore := time.Now().Add(-time.Minute)
+		query := `
+			SELECT p.id, p.title, p.abstract
+			FROM embedding_jobs j
+			JOIN papers p ON p.id = j.paper_id
+			WHERE j.status IN ('pending', 'failed') AND j.attempts < ?
+			  AND (j.status = 'pending' OR j.updated_at <= ?)
+			  AND p.title != '' AND p.abstract != ''
+			  AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.paper_id = p.id)
+			ORDER BY j.priority DESC, j.created_at, j.paper_id
+			LIMIT ?`
+		if w.cache.dbType == DBTypePostgres {
+			query += " FOR UPDATE OF j SKIP LOCKED"
+		}
+		if err := tx.Raw(query, w.config.MaxRetries, retryBefore, limit).Scan(&papers).Error; err != nil {
+			return err
+		}
+		if len(papers) == 0 {
+			return nil
+		}
+		ids := make([]string, len(papers))
+		for i := range papers {
+			ids[i] = papers[i].ID
+		}
+		return tx.Model(&EmbeddingJob{}).Where("paper_id IN ?", ids).Updates(map[string]any{
+			"status": EmbeddingJobProcessing, "attempts": gorm.Expr("attempts + 1"), "last_error": "",
+		}).Error
+	})
 	return papers, err
+}
+
+func (w *EmbeddingWorker) finishEmbeddingJobs(ctx context.Context, papers []Paper, reportedSuccess, reportedFailed int) (success, failed int) {
+	now := time.Now()
+	for i := range papers {
+		updates := map[string]any{"updated_at": now}
+		if w.cache.HasEmbedding(ctx, papers[i].ID) {
+			updates["status"] = EmbeddingJobCompleted
+			updates["last_error"] = ""
+			success++
+		} else {
+			updates["status"] = EmbeddingJobFailed
+			updates["last_error"] = fmt.Sprintf("legacy service reported %d processed/%d skipped but no embedding postcondition was found", reportedSuccess, reportedFailed)
+			failed++
+		}
+		if err := w.cache.db.WithContext(ctx).Model(&EmbeddingJob{}).Where("paper_id = ?", papers[i].ID).Updates(updates).Error; err != nil {
+			log.Printf("Error updating embedding job %s: %v", papers[i].ID, err)
+		}
+	}
+	return success, failed
 }
 
 // countPendingPapers counts papers without embeddings.
 func (w *EmbeddingWorker) countPendingPapers(ctx context.Context) (int64, error) {
+	if w == nil || w.cache == nil {
+		return 0, fmt.Errorf("legacy embedding worker cache unavailable")
+	}
 	var count int64
 	err := w.cache.db.WithContext(ctx).
 		Raw(`
-			SELECT COUNT(*) FROM papers p
-			WHERE p.title != '' AND p.abstract != ''
-			AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.paper_id = p.id)
-		`).
+			SELECT COUNT(*)
+			FROM embedding_jobs j
+			JOIN papers p ON p.id = j.paper_id
+			WHERE j.status IN ('pending', 'failed') AND j.attempts < ?
+			  AND p.title != '' AND p.abstract != ''
+			  AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.paper_id = p.id)
+		`, w.config.MaxRetries).
 		Scan(&count).Error
 	return count, err
 }
@@ -348,6 +456,9 @@ func (w *EmbeddingWorker) embedPapers(ctx context.Context, papers []Paper) (succ
 		return 0, len(papers)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if w.config.MutationToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+w.config.MutationToken)
+	}
 
 	resp, err := w.client.Do(httpReq)
 	if err != nil {
@@ -371,7 +482,8 @@ func (w *EmbeddingWorker) embedPapers(ctx context.Context, papers []Paper) (succ
 	return result.Processed, result.Skipped
 }
 
-// QueuePaper adds a paper to the embedding queue with optional priority.
+// QueueEmbedding adds a paper to the retired MiniLM queue.
+// Deprecated: use EnsureQwenPaperJobs.
 func (c *Cache) QueueEmbedding(ctx context.Context, paperID string, priority int) error {
 	job := EmbeddingJob{
 		PaperID:  paperID,
@@ -387,11 +499,12 @@ func (c *Cache) QueueEmbedding(ctx context.Context, paperID string, priority int
 		Create(&job).Error
 }
 
-// QueueAllPendingEmbeddings queues all papers without embeddings.
+// QueueAllPendingEmbeddings queues retired MiniLM work.
+// Deprecated: use Qwen jobs.
 func (c *Cache) QueueAllPendingEmbeddings(ctx context.Context) (int64, error) {
 	result := c.db.WithContext(ctx).Exec(`
 		INSERT INTO embedding_jobs (paper_id, status, priority, created_at, updated_at)
-		SELECT p.id, 'pending', 0, NOW(), NOW()
+		SELECT p.id, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 		FROM papers p
 		WHERE p.title != '' AND p.abstract != ''
 		AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.paper_id = p.id)
@@ -400,7 +513,8 @@ func (c *Cache) QueueAllPendingEmbeddings(ctx context.Context) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
-// EmbeddingJobStats returns statistics about embedding jobs.
+// EmbeddingJobStats returns retired MiniLM queue statistics.
+// Deprecated: use Qwen pipeline status.
 func (c *Cache) EmbeddingJobStats(ctx context.Context) (map[string]int64, error) {
 	type statusCount struct {
 		Status string

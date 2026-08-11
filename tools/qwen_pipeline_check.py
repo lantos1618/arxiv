@@ -54,7 +54,7 @@ def check_service(service_url, timeout):
     return errors, lines
 
 
-def check_abstracts(conn, model, dim, window_minutes, min_recent):
+def check_abstracts(conn, model, dim, abstract_scope, window_minutes, min_recent):
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -64,18 +64,46 @@ def check_abstracts(conn, model, dim, window_minutes, min_recent):
                  WHERE COALESCE(title, '') <> ''
                    AND COALESCE(abstract, '') <> '') AS eligible,
                 (SELECT count(*)
-                 FROM embeddings_v2
-                 WHERE scope = 'abstract'
-                   AND model = %s
-                   AND dim = %s) AS embedded,
+                 FROM papers p
+                 JOIN embeddings_v2 e
+                   ON e.paper_id = p.id
+                  AND e.scope = %s
+                  AND e.model = %s
+                  AND e.dim = %s
+                  AND e.vector IS NOT NULL
+                  AND e.source_hash = encode(digest(
+                      CASE
+                          WHEN trim(COALESCE(p.title, '')) <> ''
+                           AND trim(COALESCE(p.abstract, '')) <> ''
+                          THEN trim(p.title) || '. ' || regexp_replace(trim(p.abstract), '\\s+', ' ', 'g')
+                          ELSE trim(COALESCE(p.title, '')) || regexp_replace(trim(COALESCE(p.abstract, '')), '\\s+', ' ', 'g')
+                      END,
+                      'sha256'
+                  ), 'hex')
+                 WHERE COALESCE(p.title, '') <> ''
+                   AND COALESCE(p.abstract, '') <> '') AS embedded,
                 (SELECT count(*)
-                 FROM embeddings_v2
-                 WHERE scope = 'abstract'
-                   AND model = %s
-                   AND dim = %s
-                   AND updated > now() - (%s * interval '1 minute')) AS recent
+                 FROM papers p
+                 JOIN embeddings_v2 e
+                   ON e.paper_id = p.id
+                  AND e.scope = %s
+                  AND e.model = %s
+                  AND e.dim = %s
+                  AND e.vector IS NOT NULL
+                  AND e.source_hash = encode(digest(
+                      CASE
+                          WHEN trim(COALESCE(p.title, '')) <> ''
+                           AND trim(COALESCE(p.abstract, '')) <> ''
+                          THEN trim(p.title) || '. ' || regexp_replace(trim(p.abstract), '\\s+', ' ', 'g')
+                          ELSE trim(COALESCE(p.title, '')) || regexp_replace(trim(COALESCE(p.abstract, '')), '\\s+', ' ', 'g')
+                      END,
+                      'sha256'
+                  ), 'hex')
+                 WHERE COALESCE(p.title, '') <> ''
+                   AND COALESCE(p.abstract, '') <> ''
+                   AND e.updated > now() - (%s * interval '1 minute')) AS recent
             """,
-            (model, dim, model, dim, window_minutes),
+            (abstract_scope, model, dim, abstract_scope, model, dim, window_minutes),
         )
         eligible, embedded, recent = cur.fetchone()
 
@@ -87,7 +115,7 @@ def check_abstracts(conn, model, dim, window_minutes, min_recent):
             f"min_recent={min_recent} pending={pending}"
         )
     line = (
-        f"abstract eligible={eligible} embedded={embedded} pending={pending} "
+        f"abstract scope={abstract_scope} eligible={eligible} embedded={embedded} pending={pending} "
         f"recent_{window_minutes}m={recent}"
     )
     return errors, [line]
@@ -105,17 +133,21 @@ def check_chunks(conn, model, dim, chunk_scope, window_minutes, min_recent):
                 (SELECT count(*)
                  FROM paper_chunks c
                  JOIN chunk_embeddings_v2 e
-                   ON e.chunk_id = c.id
-                  AND e.model = %s
-                  AND e.dim = %s
+                  ON e.chunk_id = c.id
+                 AND e.model = %s
+                 AND e.dim = %s
+                 AND e.vector IS NOT NULL
+                 AND e.source_hash = c.text_hash
                  WHERE c.scope = %s
                    AND COALESCE(c.text, '') <> '') AS embedded,
                 (SELECT count(*)
                  FROM paper_chunks c
                  JOIN chunk_embeddings_v2 e
-                   ON e.chunk_id = c.id
-                  AND e.model = %s
-                  AND e.dim = %s
+                  ON e.chunk_id = c.id
+                 AND e.model = %s
+                 AND e.dim = %s
+                 AND e.vector IS NOT NULL
+                 AND e.source_hash = c.text_hash
                  WHERE c.scope = %s
                    AND COALESCE(c.text, '') <> ''
                    AND e.updated > now() - (%s * interval '1 minute')) AS recent
@@ -145,12 +177,20 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dim", type=int, default=DEFAULT_DIM)
     parser.add_argument("--scope", choices=["abstract", "chunks", "both"], default="abstract")
+    parser.add_argument("--abstract-scope", default="abstract")
     parser.add_argument("--chunk-scope", default="pdf_text")
     parser.add_argument("--window-minutes", type=int, default=15)
     parser.add_argument("--min-recent", type=int, default=1)
     parser.add_argument("--skip-service", action="store_true")
     parser.add_argument("--skip-db", action="store_true")
     args = parser.parse_args()
+
+    if args.skip_service and args.skip_db:
+        parser.error("--skip-service and --skip-db together would perform no checks")
+    if args.timeout <= 0 or args.window_minutes <= 0 or args.min_recent < 0:
+        parser.error("timeout/window must be positive and min-recent must be non-negative")
+    if args.dim <= 0 or not args.abstract_scope.strip() or not args.chunk_scope.strip():
+        parser.error("dimension and scope values must be valid")
 
     errors = []
     lines = []
@@ -165,7 +205,12 @@ def main():
         try:
             if args.scope in ("abstract", "both"):
                 db_errors, db_lines = check_abstracts(
-                    conn, args.model, args.dim, args.window_minutes, args.min_recent
+                    conn,
+                    args.model,
+                    args.dim,
+                    args.abstract_scope,
+                    args.window_minutes,
+                    args.min_recent,
                 )
                 errors.extend(db_errors)
                 lines.extend(db_lines)

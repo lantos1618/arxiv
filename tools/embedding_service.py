@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""
-FastAPI Embedding Service - Persistent model for fast embedding generation.
+"""Archived MiniLM embedding service for offline migration only.
 
-This service loads the sentence-transformers model once at startup and provides
-HTTP endpoints for embedding generation. This eliminates the 1-2 second model
-loading overhead per query.
+Qwen is canonical. This module is excluded from production images and refuses
+startup unless ALLOW_LEGACY_MINILM_MIGRATION=1 is explicitly set.
 
 Usage:
-    uvicorn embedding_service:app --host 0.0.0.0 --port 8000
-
-    Or with auto-reload for development:
-    uvicorn embedding_service:app --host 0.0.0.0 --port 8000 --reload
+    ALLOW_LEGACY_MINILM_MIGRATION=1 \
+      uvicorn embedding_service:app --host 127.0.0.1 --port 8000
 
 Environment Variables:
     EMBEDDING_MODEL: Model name (default: all-MiniLM-L6-v2)
@@ -18,14 +14,18 @@ Environment Variables:
 """
 
 import os
+import secrets
 import sys
 import time
 import logging
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
+if os.environ.get("ALLOW_LEGACY_MINILM_MIGRATION") != "1":
+    raise RuntimeError("legacy MiniLM service is archived and must not run in production")
+
 import numpy as np
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
@@ -42,6 +42,8 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 # Configuration
 MODEL_NAME = os.environ.get('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
 EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 dimension
+MAX_BATCH_SIZE = int(os.environ.get('EMBEDDING_MAX_BATCH_SIZE', '128'))
+MUTATION_TOKEN = os.environ.get('EMBEDDING_MUTATION_TOKEN', '').strip()
 
 # Global model instance
 model: Optional[SentenceTransformer] = None
@@ -97,6 +99,14 @@ class PaperEmbedResponse(BaseModel):
     paper_id: str
     success: bool
     message: str
+
+
+def require_mutation_auth(authorization: str = Header(default="")):
+    if not MUTATION_TOKEN:
+        raise HTTPException(status_code=503, detail="Mutation endpoints are disabled")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(credential, MUTATION_TOKEN):
+        raise HTTPException(status_code=401, detail="Bearer token required")
 
 
 @asynccontextmanager
@@ -168,6 +178,8 @@ async def embed_batch(request: EmbedBatchRequest):
 
     if not request.texts:
         raise HTTPException(status_code=400, detail="Texts list cannot be empty")
+    if len(request.texts) > MAX_BATCH_SIZE:
+        raise HTTPException(status_code=413, detail=f"At most {MAX_BATCH_SIZE} texts are allowed")
 
     # Filter empty texts
     texts = [t.strip() for t in request.texts if t.strip()]
@@ -210,7 +222,7 @@ def get_db_connection():
 
 
 @app.post("/embed/paper", response_model=PaperEmbedResponse)
-async def embed_paper(request: PaperEmbedRequest):
+async def embed_paper(request: PaperEmbedRequest, _auth=Depends(require_mutation_auth)):
     """Generate and store embedding for a single paper."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -259,13 +271,15 @@ async def embed_paper(request: PaperEmbedRequest):
 
 
 @app.post("/embed/papers")
-async def embed_papers(request: PaperEmbedBatchRequest):
+async def embed_papers(request: PaperEmbedBatchRequest, _auth=Depends(require_mutation_auth)):
     """Generate and store embeddings for multiple papers."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     if not request.papers:
         raise HTTPException(status_code=400, detail="Papers list cannot be empty")
+    if len(request.papers) > MAX_BATCH_SIZE:
+        raise HTTPException(status_code=413, detail=f"At most {MAX_BATCH_SIZE} papers are allowed")
 
     # Prepare texts and filter empty ones
     valid_papers = []
@@ -318,4 +332,5 @@ async def embed_papers(request: PaperEmbedBatchRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("EMBEDDING_PORT", 8001))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = os.environ.get("EMBEDDING_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)

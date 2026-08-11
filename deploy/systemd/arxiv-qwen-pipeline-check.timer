@@ -1,0 +1,12 @@
+[Unit]
+Description=Monitor the Qwen embedding pipeline
+
+[Timer]
+OnBootSec=10m
+OnUnitInactiveSec=15m
+RandomizedDelaySec=2m
+Persistent=true
+Unit=arxiv-qwen-pipeline-check.service
+
+[Install]
+WantedBy=timers.target

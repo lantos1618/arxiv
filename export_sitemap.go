@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -32,7 +33,7 @@ type SitemapIndex []SitemapIndexEntry
 // environment variable when available, falling back to https://arxiv.gg.
 func SiteBaseURL() string {
 	if v := os.Getenv("SITE_URL"); v != "" {
-		return v
+		return strings.TrimRight(v, "/")
 	}
 	return "https://arxiv.gg"
 }

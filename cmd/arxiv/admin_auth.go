@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/lantos1618/arxiv.gg"
 )
@@ -20,7 +19,6 @@ const (
 	adminTokenCookie
 	adminTokenHeader
 	adminTokenBearer
-	adminTokenQuery
 )
 
 func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -35,11 +33,8 @@ func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	provided, source := adminTokenFromRequest(r)
+	provided, _ := adminTokenFromRequest(r)
 	if strings.TrimSpace(token) != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1 {
-		if source == adminTokenQuery && !strings.HasPrefix(r.URL.Path, "/api/") {
-			setAdminCookie(w, r, provided)
-		}
 		return true
 	}
 
@@ -73,8 +68,46 @@ func (s *server) hasAdminAccess(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
 }
 
+func (s *server) hasAdminCookieAccess(r *http.Request) bool {
+	provided, source := adminTokenFromRequest(r)
+	if source != adminTokenCookie {
+		return false
+	}
+	token := os.Getenv("ADMIN_TOKEN")
+	if strings.TrimSpace(token) == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
+}
+
+func (s *server) requireQwenWorker(w http.ResponseWriter, r *http.Request) bool {
+	if s.hasQwenWorkerAccess(r) || s.hasAdminAccess(r) {
+		return true
+	}
+	writeAdminDenied(w, r, http.StatusUnauthorized, "qwen worker token required")
+	return false
+}
+
+func (s *server) hasQwenWorkerAccess(r *http.Request) bool {
+	token := strings.TrimSpace(os.Getenv("QWEN_WORKER_TOKEN"))
+	if token == "" {
+		return false
+	}
+	provided := strings.TrimSpace(r.Header.Get("X-Qwen-Worker-Token"))
+	if provided == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			provided = strings.TrimSpace(auth[len("bearer "):])
+		}
+	}
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
+}
+
 func (s *server) currentAdminUser(r *http.Request) (*arxiv.User, bool) {
-	user, ok := s.currentUser(r)
+	user, ok := s.sessionUser(r)
 	if !ok {
 		return nil, false
 	}
@@ -115,24 +148,7 @@ func configuredAdminEmailSet() map[string]struct{} {
 	return emails
 }
 
-func setAdminCookie(w http.ResponseWriter, r *http.Request, token string) {
-	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  time.Now().Add(12 * time.Hour),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   secure,
-	})
-}
-
 func adminTokenFromRequest(r *http.Request) (string, adminTokenSource) {
-	if cookie, err := r.Cookie(adminCookieName); err == nil {
-		return cookie.Value, adminTokenCookie
-	}
-
 	if provided := r.Header.Get("X-Admin-Token"); provided != "" {
 		return provided, adminTokenHeader
 	}
@@ -142,8 +158,8 @@ func adminTokenFromRequest(r *http.Request) (string, adminTokenSource) {
 		return strings.TrimSpace(auth[len("bearer "):]), adminTokenBearer
 	}
 
-	if provided := r.URL.Query().Get("admin_token"); provided != "" {
-		return provided, adminTokenQuery
+	if cookie, err := r.Cookie(adminCookieName); err == nil {
+		return cookie.Value, adminTokenCookie
 	}
 
 	return "", adminTokenMissing

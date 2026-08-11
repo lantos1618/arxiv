@@ -6,6 +6,9 @@
 /bin/
 /test_data/
 .env
+.secrets/
+*.log
+docs/SITE_MAP.*
 __pycache__/
 *.pyc
 

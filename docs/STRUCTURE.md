@@ -1,137 +1,54 @@
 # Project Structure
 
-## Overview
+This map reflects the current source tree. It intentionally avoids line/file-count claims that become stale.
 
-The arXiv Cache Manager uses a flat package structure (`package arxiv`) at the root, which is idiomatic for Go libraries. The CLI application lives in `cmd/arxiv/`.
+## Root Package
 
-## Directory Layout
+| Area | Files |
+|---|---|
+| Database and cache | `cache.go`, `cache_models.go`, `cache_paper.go`, `cache_lru.go`, `detail_cache.go`, `sql_helpers.go` |
+| Ingestion | `data_fetch.go`, `data_download.go`, `data_oai.go`, `data_sync.go` |
+| Search | `search.go`, `search_fts.go`, `search_pdf.go`, `search_embeddings.go`, `embedding_models.go` |
+| Qwen queues | `qwen_jobs.go` |
+| Legacy embeddings | `embedding_worker.go` |
+| Citations/authors | `citations.go`, `citations_refs.go`, `authors.go` |
+| Accounts/community | `auth.go`, `api_keys.go`, `user_views.go`, `feedback.go` |
+| Admin/export | `admin_stats.go`, `export.go`, `export_sitemap.go` |
 
-```
-arxiv/
-├── cmd/arxiv/              # CLI and web server
-│   ├── main.go             # CLI entry point and commands
-│   ├── serve.go            # Web server and HTML handlers
-│   ├── api.go              # REST API handlers
-│   ├── middleware.go       # HTTP middleware (rate limiting, caching)
-│   ├── doc.go              # CLI documentation
-│   └── templates/          # HTML templates
-│
-├── docs/                   # Documentation
-│   ├── API.md              # REST API reference
-│   ├── PLAN.md             # Semantic search roadmap
-│   ├── SETUP.md            # System requirements
-│   ├── STRUCTURE.md        # This file
-│   ├── TESTING.md          # Test documentation
-│   └── REVIEW.md           # Project review
-│
-├── tools/                  # Utility scripts
-│   ├── generate_embeddings.py  # Python embedding generator
-│   ├── requirements.txt    # Python dependencies
-│   └── README.md           # Tools documentation
-│
-├── *.go                    # Core library files
-├── *_test.go               # Test files
-├── Makefile                # Build automation
-├── CONTRIBUTING.md         # Contribution guidelines
-├── README.md               # Project overview
-├── go.mod / go.sum         # Go modules
-└── Dockerfile              # Container build
-```
+## Commands
 
-## Source Files by Category
+- `cmd/arxiv/` contains the user CLI, HTTP server, pages, templates, REST/SSE API, MCP endpoint, auth, feedback, admin, middleware, SEO handlers, and tests.
+- `cmd/migrate/` contains the SQLite-to-PostgreSQL migration command and tests.
 
-### Core (5 files)
-| File | Purpose |
-|------|---------|
-| `cache.go` | Cache initialization, database setup, schema management |
-| `models.go` | Data models: Paper, Citation, Embedding, SyncState, etc. |
-| `lru.go` | Thread-safe LRU cache for in-memory paper caching |
-| `paper.go` | Paper utility methods (URLs, categories) |
-| `log.go` | Structured logging utilities |
+The executable imports the root package as `github.com/lantos1618/arxiv.gg`.
 
-### Search (5 files)
-| File | Purpose |
-|------|---------|
-| `search.go` | FTS5 keyword search, category listing, paper filtering |
-| `semantic.go` | Semantic search using vector embeddings |
-| `embeddings.go` | Embedding storage, retrieval, and generation interface |
-| `fts.go` | FTS5 index management |
-| `pdfsearch.go` | PDF text extraction and search |
+## Operations
 
-### Data Operations (4 files)
-| File | Purpose |
-|------|---------|
-| `fetch.go` | Fetch paper metadata from arXiv API |
-| `download.go` | Download PDFs and TeX sources |
-| `sync.go` | OAI-PMH bulk metadata synchronization |
-| `oai.go` | OAI-PMH protocol client |
+- `tools/` contains Qwen services/workers, queue and backfill scripts, full-paper extraction/chunking, pipeline checks, load/IndexNow helpers, and legacy MiniLM utilities.
+- `deploy/sql/` contains reviewed PostgreSQL indexes and corrective migrations.
+- `deploy/systemd/` and `deploy/qwen-jit-orchestrator.service` contain worker service assets.
+- `Dockerfile`, `Dockerfile.qwen-api-worker`, `docker-compose.yml`, `start.sh`, and `Makefile` support builds and operations.
 
-### Citations (2 files)
-| File | Purpose |
-|------|---------|
-| `citations.go` | Citation graph queries, paper relationships |
-| `refs.go` | Reference extraction from TeX/bbl files |
+## Documentation
 
-### Export (2 files)
-| File | Purpose |
-|------|---------|
-| `export.go` | BibTeX, RIS, JSON export formats |
-| `sitemap.go` | Sitemap XML generation |
+Active references are `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, and the topic guides in `docs/`. Date-stamped audits, reviews, performance measurements, SEO reports, and marketing research are archived snapshots and are not current specifications.
 
-### Tests (8 files)
-| File | Tests |
-|------|-------|
-| `cache_test.go` | Cache operations |
-| `search_test.go` | FTS5 search |
-| `semantic_test.go` | Semantic search |
-| `embeddings_test.go` | Embedding storage/generation |
-| `citations_test.go` | Citation graph |
-| `export_test.go` | Export formats |
-| `refs_test.go` | Reference extraction |
-| `data_test.go` | Data operations |
+## Data Flow
 
-## Why This Structure?
-
-1. **Flat is idiomatic**: Go libraries commonly use a single package
-2. **Simple imports**: `import "github.com/lantos1618/arxiv.gg"` gives access to everything
-3. **No circular dependencies**: All code in same package
-4. **Clear file names**: Each file has single responsibility
-5. **Tests alongside code**: Go convention for discoverability
-
-## Key Types
-
-```go
-// Core types
-type Cache struct { ... }           // Main cache manager
-type Paper struct { ... }           // Paper metadata
-type Citation struct { ... }        // Citation relationship
-type Embedding struct { ... }       // Vector embedding
-
-// Search types
-type CategoryCount struct { ... }   // Category statistics
-type Reference struct { ... }       // Citation reference
-
-// Graph types
-type CitationGraph struct { ... }   // Visualization data
-type GraphNode struct { ... }       // Node in graph
-type GraphEdge struct { ... }       // Edge in graph
+```text
+arXiv OAI/API/files
+        |
+        v
+PostgreSQL + filesystem cache
+        |
+        +--> metadata FTS / author / citation queries
+        |
+        +--> PDF text --> chunks --> Qwen chunk vectors
+        |
+        +--> title + abstract --> Qwen abstract vectors
+        |
+        v
+CLI / web pages / REST / SSE / MCP
 ```
 
-## Usage Example
-
-```go
-import "github.com/lantos1618/arxiv.gg"
-
-// Open cache
-cache, err := arxiv.Open("/path/to/cache")
-defer cache.Close()
-
-// Search papers
-papers, err := cache.Search(ctx, "machine learning", "cs.AI", 20)
-
-// Get citation graph
-graph, err := cache.GetCitationGraph(ctx, "2301.00001")
-
-// Export to BibTeX
-bibtex := paper.ToBibTeX()
-```
+Accounts, sessions, signed-in paper views, API-key hashes, feedback, moderation audit data, and Qwen leases are stored in PostgreSQL alongside the catalog.

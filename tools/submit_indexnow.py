@@ -20,7 +20,6 @@ from collections.abc import Iterable, Iterator
 
 
 DEFAULT_ENDPOINT = "https://api.indexnow.org/indexnow"
-DEFAULT_INDEXNOW_KEY = "34af0c26368622541e3ca8aa555c3ad7"
 MAX_BATCH_SIZE = 10_000
 
 
@@ -125,7 +124,7 @@ def submit_batch(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--site-url", default=os.getenv("SITE_URL", "https://arxiv.gg"))
-    parser.add_argument("--key", default=os.getenv("INDEXNOW_KEY", DEFAULT_INDEXNOW_KEY))
+    parser.add_argument("--key", default=os.getenv("INDEXNOW_KEY", ""))
     parser.add_argument("--endpoint", default=os.getenv("INDEXNOW_ENDPOINT", DEFAULT_ENDPOINT))
     parser.add_argument("--url", action="append", default=[], help="URL to submit. May be repeated.")
     parser.add_argument("--file", help="Plain-text file with one URL per line.")
@@ -149,12 +148,22 @@ def source_urls(args: argparse.Namespace) -> Iterator[str]:
 def main() -> int:
     args = parse_args()
     site_url = args.site_url.rstrip("/")
-    host = urllib.parse.urlparse(site_url).netloc
-    if not host:
+    parsed_site = urllib.parse.urlparse(site_url)
+    host = parsed_site.netloc
+    if parsed_site.scheme not in {"http", "https"} or not host or parsed_site.username:
         print(f"invalid --site-url: {args.site_url}", file=sys.stderr)
+        return 2
+    if not args.key or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for char in args.key):
+        print("--key or INDEXNOW_KEY must be a non-empty URL-safe key", file=sys.stderr)
         return 2
     if not 1 <= args.batch_size <= MAX_BATCH_SIZE:
         print(f"--batch-size must be between 1 and {MAX_BATCH_SIZE}", file=sys.stderr)
+        return 2
+    if args.limit is not None and args.limit <= 0:
+        print("--limit must be positive", file=sys.stderr)
+        return 2
+    if args.timeout <= 0 or args.sleep < 0:
+        print("--timeout must be positive and --sleep must be non-negative", file=sys.stderr)
         return 2
 
     urls = dedupe(source_urls(args), host, args.limit)

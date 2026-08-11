@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,76 @@ func setHeaderIfEmpty(headers http.Header, key, value string) {
 	if headers.Get(key) == "" {
 		headers.Set(key, value)
 	}
+}
+
+func csrfProtectionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isUnsafeMethod(r.Method) && requestUsesCookieCredentials(r) && !requestHasSameOrigin(r) {
+			http.Error(w, "cross-origin request denied", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func localBrowserProtectionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if parsedHost, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = parsedHost
+		}
+		host = strings.Trim(host, "[]")
+		if !strings.EqualFold(host, "localhost") && !net.ParseIP(host).IsLoopback() {
+			http.Error(w, "loopback host required", http.StatusMisdirectedRequest)
+			return
+		}
+		hasBrowserOrigin := strings.TrimSpace(r.Header.Get("Origin")) != "" ||
+			strings.TrimSpace(r.Header.Get("Referer")) != "" ||
+			strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")) != ""
+		if isUnsafeMethod(r.Method) && hasBrowserOrigin && !requestHasSameOrigin(r) {
+			http.Error(w, "cross-origin request denied", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isUnsafeMethod(method string) bool {
+	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions && method != http.MethodTrace
+}
+
+func requestUsesCookieCredentials(r *http.Request) bool {
+	_, sessionErr := r.Cookie(sessionCookieName)
+	_, adminErr := r.Cookie(adminCookieName)
+	return sessionErr == nil || adminErr == nil
+}
+
+func requestHasSameOrigin(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+			parsed, err := url.Parse(referer)
+			if err != nil {
+				return false
+			}
+			origin = parsed.Scheme + "://" + parsed.Host
+		}
+	}
+	if origin == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	expectedScheme := "http"
+	if requestIsHTTPS(r) {
+		expectedScheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, expectedScheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 // cacheEntry holds cached response data
@@ -153,13 +224,18 @@ func (cm *cacheMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		if shouldBypassResponseCache(r) {
+		key, ok := responseCacheKey(r)
+		if !ok {
 			next.ServeHTTP(w, r)
 			return
 		}
+		variesByCookie := responseCacheVariesByCookie(r.URL.Path)
 
-		key, ok := responseCacheKey(r)
-		if !ok {
+		if shouldBypassResponseCache(r) {
+			if variesByCookie {
+				appendVary(w.Header(), "Cookie")
+				w.Header().Set("Cache-Control", "private, no-store")
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -173,6 +249,9 @@ func (cm *cacheMiddleware) Handler(next http.Handler) http.Handler {
 			// Conditional request - return 304 Not Modified
 			if r.Header.Get("If-None-Match") == entry.etag {
 				w.Header().Set("ETag", entry.etag)
+				if variesByCookie {
+					appendVary(w.Header(), "Cookie")
+				}
 				w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cm.maxAge.Seconds())))
 				w.WriteHeader(http.StatusNotModified)
 				return
@@ -182,6 +261,9 @@ func (cm *cacheMiddleware) Handler(next http.Handler) http.Handler {
 			copyHeader(w.Header(), entry.headers)
 			w.Header().Set("ETag", entry.etag)
 			w.Header().Set("Last-Modified", entry.lastMod.Format(http.TimeFormat))
+			if variesByCookie {
+				appendVary(w.Header(), "Cookie")
+			}
 			if w.Header().Get("Cache-Control") == "" {
 				w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cm.maxAge.Seconds())))
 			}
@@ -197,12 +279,21 @@ func (cm *cacheMiddleware) Handler(next http.Handler) http.Handler {
 		}
 
 		// Cache miss - capture response while writing to client
-		cw := &cachingResponseWriter{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
+		cw := &cachingResponseWriter{header: make(http.Header)}
+		if variesByCookie {
+			appendVary(cw.Header(), "Cookie")
 		}
 
 		next.ServeHTTP(cw, r)
+		if cw.statusCode == 0 {
+			cw.statusCode = http.StatusOK
+		}
+		if cw.statusCode == http.StatusOK && cw.Header().Get("Cache-Control") == "" {
+			cw.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", int(cm.maxAge.Seconds())))
+		}
+		copyHeader(w.Header(), cw.Header())
+		w.WriteHeader(cw.statusCode)
+		_, _ = w.Write(cw.data)
 
 		// Store successful responses in cache for future requests
 		if cw.statusCode == http.StatusOK && len(cw.data) > 0 {
@@ -262,6 +353,15 @@ func responseCacheKey(r *http.Request) (string, bool) {
 	return "", false
 }
 
+func responseCacheVariesByCookie(path string) bool {
+	return path == "/" ||
+		path == "/categories" ||
+		strings.HasPrefix(path, "/abs/") ||
+		strings.HasPrefix(path, "/paper/") ||
+		strings.HasPrefix(path, "/author/") ||
+		strings.HasPrefix(path, "/category/")
+}
+
 func shouldBypassResponseCache(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/admin") {
 		return true
@@ -287,6 +387,15 @@ func shouldBypassResponseCache(r *http.Request) bool {
 	return false
 }
 
+func appendVary(headers http.Header, value string) {
+	for _, part := range strings.Split(headers.Get("Vary"), ",") {
+		if strings.EqualFold(strings.TrimSpace(part), value) {
+			return
+		}
+	}
+	headers.Add("Vary", value)
+}
+
 func copyHeader(dst, src http.Header) {
 	for key, values := range src {
 		for _, value := range values {
@@ -306,19 +415,28 @@ func detectContentType(data []byte) string {
 
 // cachingResponseWriter captures response data
 type cachingResponseWriter struct {
-	http.ResponseWriter
+	header     http.Header
 	statusCode int
 	data       []byte
 }
 
+func (cw *cachingResponseWriter) Header() http.Header {
+	return cw.header
+}
+
 func (cw *cachingResponseWriter) WriteHeader(code int) {
+	if cw.statusCode != 0 {
+		return
+	}
 	cw.statusCode = code
-	cw.ResponseWriter.WriteHeader(code)
 }
 
 func (cw *cachingResponseWriter) Write(b []byte) (int, error) {
+	if cw.statusCode == 0 {
+		cw.statusCode = http.StatusOK
+	}
 	cw.data = append(cw.data, b...)
-	return cw.ResponseWriter.Write(b)
+	return len(b), nil
 }
 
 // rateLimiter provides simple rate limiting
@@ -432,7 +550,8 @@ func clientIPFromRequest(r *http.Request, trustProxyHeaders bool) string {
 		host = parsedHost
 	}
 
-	if !trustProxyHeaders {
+	remoteIP := net.ParseIP(host)
+	if !trustProxyHeaders || remoteIP == nil || (!remoteIP.IsLoopback() && !remoteIP.IsPrivate()) {
 		return host
 	}
 

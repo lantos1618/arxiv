@@ -12,7 +12,7 @@
 	.admin-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 	.admin-table th, .admin-table td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.45rem; text-align: left; vertical-align: top; }
 	.admin-table th { color: #374151; font-weight: 700; background: #f9fafb; }
-	.placeholder-row td { color: #92400e; background: #fffbeb; }
+	.admin-note { color: #6b7280; }
 	@media (max-width: 760px) {
 		.admin-table { display: block; overflow-x: auto; white-space: nowrap; }
 	}
@@ -25,6 +25,7 @@
 	<a href="/admin">Overview</a>
 	<a class="active" href="/admin/users">Users</a>
 	<a href="/admin/audit">Audit</a>
+	<a href="/admin/feedback">Feedback</a>
 </div>
 
 <div class="admin-section">
@@ -36,7 +37,7 @@
 		<div class="admin-metric"><div class="admin-metric-label">Active 24h</div><div class="admin-metric-value">{{formatInt .Stats.Users.Active24h}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Active 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Active7d}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Free</div><div class="admin-metric-value">{{formatInt .Stats.Users.FreeUsers}}</div></div>
-		<div class="admin-metric"><div class="admin-metric-label">Paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Plan label: paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Paper views</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaperViews}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Viewers 24h</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers24h}}</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Viewers 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers7d}}</div></div>
@@ -64,11 +65,9 @@
 			{{else}}
 			<tr><td colspan="8">No users yet.</td></tr>
 			{{end}}
-			<tr class="placeholder-row">
-				<td colspan="8">PLACEHOLDER: search counts, saved searches, billing status, and feature usage are not tracked yet.</td>
-			</tr>
 		</tbody>
 	</table>
+	<p class="admin-note">This page tracks account rows, sessions, and signed-in paper views. Plan labels are stored, but billing and payment activity are not recorded here.</p>
 </div>
 
 <div class="admin-section">
@@ -99,7 +98,7 @@
 		<thead><tr><th>Plan</th><th>Who</th><th>Access</th><th>Billing</th></tr></thead>
 		<tbody>
 			{{range .Plans}}
-			<tr {{if .Placeholder}}class="placeholder-row"{{end}}>
+			<tr>
 				<td>{{.Plan}}</td><td>{{.Who}}</td><td>{{.Access}}</td><td>{{.Billing}}</td>
 			</tr>
 			{{end}}

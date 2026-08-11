@@ -1,0 +1,17 @@
+[Unit]
+Description=Check Qwen embedding service and backfill progress
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+Environment=ARXIV_REPOSITORY=/opt/arxiv
+EnvironmentFile=-/etc/arxiv/qwen-pipeline-check.env
+ExecStart=/bin/sh -c 'cd "$ARXIV_REPOSITORY" && docker compose exec -T "${ARXIV_APP_SERVICE:-arxiv}" python3 /app/tools/qwen_pipeline_check.py --scope both --service-url "$QWEN_EMBEDDING_SERVICE_URL" --window-minutes "${QWEN_CHECK_WINDOW_MINUTES:-30}" --min-recent "${QWEN_CHECK_MIN_RECENT:-1}"'
+User=arxiv
+Group=docker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=2m

@@ -6,27 +6,16 @@ import (
 )
 
 type adminPlanView struct {
-	Plan        string
-	Who         string
-	Access      string
-	Billing     string
-	Placeholder bool
-}
-
-type adminPlaceholderView struct {
-	Area string
-	What string
-	Why  string
+	Plan    string
+	Who     string
+	Access  string
+	Billing string
 }
 
 func (s *server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	if !s.localMode && !s.requireAdmin(w, r) {
 		return
 	}
-	if redirectAdminTokenURL(w, r) {
-		return
-	}
-
 	s.recordAdminView(r, "admin.dashboard.view")
 	stats, err := s.cache.AdminStats(r.Context())
 	if err != nil {
@@ -36,10 +25,9 @@ func (s *server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderTemplate(w, r, "admin", map[string]any{
-		"Title":        "Admin",
-		"Stats":        stats,
-		"Plans":        simplePlanModel(),
-		"Placeholders": adminPlaceholders(),
+		"Title": "Admin",
+		"Stats": stats,
+		"Plans": simplePlanModel(),
 	})
 }
 
@@ -47,10 +35,6 @@ func (s *server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.localMode && !s.requireAdmin(w, r) {
 		return
 	}
-	if redirectAdminTokenURL(w, r) {
-		return
-	}
-
 	s.recordAdminView(r, "admin.users.view")
 	stats, err := s.cache.AdminStats(r.Context())
 	if err != nil {
@@ -70,10 +54,6 @@ func (s *server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.localMode && !s.requireAdmin(w, r) {
 		return
 	}
-	if redirectAdminTokenURL(w, r) {
-		return
-	}
-
 	s.recordAdminView(r, "admin.audit.view")
 	stats, err := s.cache.AdminStats(r.Context())
 	if err != nil {
@@ -92,7 +72,13 @@ func redirectAdminTokenURL(w http.ResponseWriter, r *http.Request) bool {
 	if r.URL.Query().Get("admin_token") == "" {
 		return false
 	}
-	http.Redirect(w, r, r.URL.Path, http.StatusSeeOther)
+	query := r.URL.Query()
+	query.Del("admin_token")
+	target := r.URL.Path
+	if encoded := query.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 	return true
 }
 
@@ -130,35 +116,8 @@ func simplePlanModel() []adminPlanView {
 		{
 			Plan:    "free",
 			Who:     "Signed in with Google",
-			Access:  "Saved account identity plus Deep Search over full-paper chunks while it is free during testing.",
+			Access:  "Account identity and Deep Search over full-paper chunks.",
 			Billing: "Real plan value on users.plan. No payment required.",
-		},
-		{
-			Plan:        "paid",
-			Who:         "Future paid user",
-			Access:      "Reserved for higher limits, batch tools, and full-paper GPU-heavy features.",
-			Billing:     "PLACEHOLDER: Stripe/payment provider is not connected yet.",
-			Placeholder: true,
-		},
-	}
-}
-
-func adminPlaceholders() []adminPlaceholderView {
-	return []adminPlaceholderView{
-		{
-			Area: "Traffic",
-			What: "PLACEHOLDER: Cloudflare, Google Search Console, Bing, and GA numbers are not pulled into this app.",
-			Why:  "Use the external dashboards for now; this page only shows database-backed app state.",
-		},
-		{
-			Area: "Payments",
-			What: "PLACEHOLDER: no Stripe tables, webhooks, or billing provider are wired.",
-			Why:  "The app currently supports simple plan labels only: anon, free, paid.",
-		},
-		{
-			Area: "GPU worker host",
-			What: "PLACEHOLDER: remote L40S worker health is not attached to this app yet.",
-			Why:  "When the worker exists, expose a small signed status endpoint and show it here.",
 		},
 	}
 }

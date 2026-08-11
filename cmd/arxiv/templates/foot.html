@@ -1,4 +1,10 @@
+{{define "build_footer"}}
+<footer class="site-footer" aria-label="Build information">
+	<span>Build {{.BuildDate}}</span>{{if .BuildCommit}}<span class="site-footer-separator">·</span><span>{{.BuildCommit}}</span>{{end}}
+</footer>
+{{end}}
 {{define "foot"}}
+{{template "build_footer" .}}
 </body>
 </html>
 {{end}}

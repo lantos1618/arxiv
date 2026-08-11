@@ -1,19 +1,23 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	arxiv "github.com/lantos1618/arxiv.gg"
 )
 
-func TestRequireAdminSetsCookieOnlyForBrowserQueryLogin(t *testing.T) {
+func TestRequireAdminAcceptsExplicitCredentialsAndRejectsQueryToken(t *testing.T) {
 	t.Setenv("ADMIN_TOKEN", "test-admin-token")
 
 	tests := []struct {
-		name       string
-		path       string
-		setup      func(*http.Request)
-		wantCookie bool
+		name   string
+		path   string
+		setup  func(*http.Request)
+		wantOK bool
 	}{
 		{
 			name: "existing cookie",
@@ -21,6 +25,7 @@ func TestRequireAdminSetsCookieOnlyForBrowserQueryLogin(t *testing.T) {
 			setup: func(r *http.Request) {
 				r.AddCookie(&http.Cookie{Name: adminCookieName, Value: "test-admin-token"})
 			},
+			wantOK: true,
 		},
 		{
 			name: "x admin token header",
@@ -28,6 +33,7 @@ func TestRequireAdminSetsCookieOnlyForBrowserQueryLogin(t *testing.T) {
 			setup: func(r *http.Request) {
 				r.Header.Set("X-Admin-Token", "test-admin-token")
 			},
+			wantOK: true,
 		},
 		{
 			name: "bearer token",
@@ -35,15 +41,11 @@ func TestRequireAdminSetsCookieOnlyForBrowserQueryLogin(t *testing.T) {
 			setup: func(r *http.Request) {
 				r.Header.Set("Authorization", "Bearer test-admin-token")
 			},
+			wantOK: true,
 		},
 		{
-			name: "api query token",
+			name: "query token",
 			path: "/api/v1/embeddings/generate?admin_token=test-admin-token",
-		},
-		{
-			name:       "browser query token",
-			path:       "/admin/embeddings?admin_token=test-admin-token",
-			wantCookie: true,
 		},
 	}
 
@@ -56,24 +58,21 @@ func TestRequireAdminSetsCookieOnlyForBrowserQueryLogin(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			if ok := (&server{}).requireAdmin(rec, req); !ok {
-				t.Fatal("requireAdmin returned false")
-			}
-
-			cookies := rec.Result().Cookies()
-			if tt.wantCookie {
-				if len(cookies) != 1 {
-					t.Fatalf("expected one cookie, got %d", len(cookies))
-				}
-				if cookies[0].Name != adminCookieName {
-					t.Fatalf("expected cookie %q, got %q", adminCookieName, cookies[0].Name)
-				}
-				return
-			}
-			if len(cookies) != 0 {
-				t.Fatalf("expected no cookie, got %d", len(cookies))
+			if ok := (&server{}).requireAdmin(rec, req); ok != tt.wantOK {
+				t.Fatalf("requireAdmin returned %v, want %v", ok, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestAdminTokenExplicitHeaderPrecedesCookie(t *testing.T) {
+	t.Setenv("ADMIN_TOKEN", "header-token")
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: "stale-cookie"})
+	req.Header.Set("X-Admin-Token", "header-token")
+
+	if ok := (&server{}).requireAdmin(httptest.NewRecorder(), req); !ok {
+		t.Fatal("explicit admin header should take precedence over cookie")
 	}
 }
 
@@ -107,5 +106,35 @@ func TestRequireAdminKeepsAPITokenGateWhenAdminEmailsConfigured(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+}
+
+func TestAccountAPIKeyDoesNotInheritAdminOrWorkerAccess(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("ADMIN_EMAILS", "owner@example.com")
+	t.Setenv("ADMIN_TOKEN", "")
+	t.Setenv("QWEN_WORKER_TOKEN", "worker-secret")
+	cache, err := arxiv.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	user, err := cache.FindOrCreateUser(context.Background(), "owner@example.com", "Owner", "", true, "google", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rawKey, err := cache.CreateUserAPIKey(context.Background(), user.ID, "Agent access")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &server{cache: cache}
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	if server.requireAdmin(httptest.NewRecorder(), req) {
+		t.Fatal("account API key inherited admin access")
+	}
+	if server.requireQwenWorker(httptest.NewRecorder(), req) {
+		t.Fatal("account API key inherited worker access")
 	}
 }

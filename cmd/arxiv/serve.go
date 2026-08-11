@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,12 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 		}
 		return t.UTC().Format("2006-01-02 15:04")
 	},
+	"dateStamp": func(t time.Time) string {
+		if t.IsZero() {
+			return "-"
+		}
+		return t.UTC().Format("2 Jan 2006")
+	},
 	"parseAuthors":    parseAuthors,
 	"limitAuthors":    limitAuthors,
 	"parseCategories": parseCategories,
@@ -66,6 +73,7 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	"authorPath":      authorPath,
 	"categoryPath":    categoryPath,
 	"paperPath":       paperPath,
+	"cleanLatex":      cleanLatexText,
 	"mul": func(a, b interface{}) float64 {
 		var aFloat, bFloat float64
 		switch v := a.(type) {
@@ -88,33 +96,57 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 	},
 }).ParseFS(templateFS, "templates/*.html"))
 
-const defaultIndexNowKey = "34af0c26368622541e3ca8aa555c3ad7"
 const defaultOfficialArxivPapers = 3045638
 const defaultOfficialArxivPapersAsOf = "2026-05-16"
+
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 2 * time.Minute
+	httpShutdownTimeout   = 10 * time.Second
+)
+
+var (
+	latexHrefPattern        = regexp.MustCompile(`\\href\{([^{}]*)\}\{([^{}]*)\}`)
+	latexURLPattern         = regexp.MustCompile(`\\url\{([^{}]*)\}`)
+	latexTextCommandPattern = regexp.MustCompile(`\\(?:textit|textbf|emph|mathrm|mathbf|texttt)\{([^{}]*)\}`)
+)
+
+func cleanLatexText(s string) string {
+	if s == "" {
+		return s
+	}
+	s = latexHrefPattern.ReplaceAllString(s, "$2 ($1)")
+	s = latexURLPattern.ReplaceAllString(s, "$1")
+	for i := 0; i < 3; i++ {
+		next := latexTextCommandPattern.ReplaceAllString(s, "$1")
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return s
+}
 
 func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 8080, "Port to listen on")
 	localMode := fs.Bool("local", false, "Enable local PDF/source caching (downloads files locally instead of redirecting to arxiv.org)")
-	embeddingService := fs.String("embedding-service", "", "URL of embedding service (e.g., http://localhost:8001)")
-	enableEmbeddingWorker := fs.Bool("embedding-worker", false, "Enable background embedding worker")
 	fs.Parse(args)
 
-	// Check environment variable for embedding service URL if not provided via flag
-	embeddingServiceURL := *embeddingService
-	if embeddingServiceURL == "" {
-		embeddingServiceURL = os.Getenv("EMBEDDING_SERVICE_URL")
-	}
 	qwenEmbeddingServiceURL := strings.TrimSpace(os.Getenv("QWEN_EMBEDDING_SERVICE_URL"))
+	qwenAsyncWorkerEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("QWEN_ASYNC_WORKER_ENABLED")), "true")
 	trustProxyHeaders := os.Getenv("TRUST_PROXY_HEADERS") == "true"
 	indexNowKey := configuredIndexNowKey()
 	officialArxivPapers := configuredOfficialArxivPapers()
 	officialArxivPapersAsOf := configuredOfficialArxivPapersAsOf()
+	googleAnalyticsID := configuredPublicID("GOOGLE_ANALYTICS_ID")
+	bingSiteVerificationID := configuredPublicID("BING_SITE_VERIFICATION_ID")
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
 		log.Fatalf("open cache: %v", err)
 	}
+	defer cache.Close()
 
 	// Start background stats refresh so homepage never blocks on COUNT(*) queries
 	cache.StartStatsRefresh(ctx)
@@ -125,11 +157,13 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 		cacheDir:                cacheDir,
 		localMode:               *localMode,
 		paperBroadcast:          newPaperBroadcaster(),
-		embeddingServiceURL:     embeddingServiceURL,
 		qwenEmbeddingServiceURL: qwenEmbeddingServiceURL,
+		qwenAsyncWorkerEnabled:  qwenAsyncWorkerEnabled,
 		indexNowKey:             indexNowKey,
 		officialArxivPapers:     officialArxivPapers,
 		officialArxivAsOf:       officialArxivPapersAsOf,
+		googleAnalyticsID:       googleAnalyticsID,
+		bingSiteVerificationID:  bingSiteVerificationID,
 		trustProxyHeaders:       trustProxyHeaders,
 		publicEmbeddingLimiter: newRateLimiter(
 			6,
@@ -141,16 +175,19 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 			10*time.Minute,
 			trustProxyHeaders,
 		),
+		feedbackLimiter: newRateLimiter(
+			30,
+			time.Minute,
+			trustProxyHeaders,
+		),
+		pdfSearchLimiter: newRateLimiter(
+			20,
+			time.Minute,
+			trustProxyHeaders,
+		),
+		pdfSearchSem: make(chan struct{}, 2),
 	}
 
-	// Start embedding worker if enabled
-	if *enableEmbeddingWorker && embeddingServiceURL != "" {
-		config := arxiv.DefaultEmbeddingWorkerConfig()
-		config.ServiceURL = embeddingServiceURL
-		srv.embeddingWorker = arxiv.NewEmbeddingWorker(cache, config)
-		srv.embeddingWorker.Start(ctx)
-		defer srv.embeddingWorker.Stop()
-	}
 	mux := http.NewServeMux()
 
 	// API routes (before other routes for proper matching)
@@ -164,10 +201,13 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/api/v1/search/stream", srv.handleAPISearchStream)
 	mux.HandleFunc("/api/v1/search/semantic", srv.handleAPISearchSemantic)
 	mux.HandleFunc("/api/v1/search/pdf", srv.handleAPISearchPDF)
+	mux.HandleFunc("/mcp", srv.handleMCP)
 	mux.HandleFunc("/api/v1/categories", srv.handleAPICategories)
 	mux.HandleFunc("/api/v1/stats", srv.handleAPIStats)
 	mux.HandleFunc("/api/v1/embeddings/generate", srv.handleAPIGenerateEmbeddings)
 	mux.HandleFunc("/api/v1/embeddings/status", srv.handleAPIEmbeddingWorkerStatus)
+	mux.HandleFunc("/api/v1/qwen/jobs/claim", srv.handleAPIQwenJobClaim)
+	mux.HandleFunc("/api/v1/qwen/jobs/", srv.handleAPIQwenJobAction)
 	mux.HandleFunc("/api/v1/papers/recent/stream", srv.handleAPIRecentPapersStream)
 	mux.HandleFunc("/api/v1/authors/collaborators", srv.handleAPIAuthorCollaborators)
 	mux.HandleFunc("/api/v1/authors/similar", srv.handleAPIAuthorSimilar)
@@ -184,6 +224,10 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/auth/google/callback", srv.handleGoogleOAuthCallback)
 	mux.HandleFunc("/logout", srv.handleLogout)
 	mux.HandleFunc("/account", srv.handleAccount)
+	mux.HandleFunc("/account/api-key/regenerate", srv.handleRegenerateAPIKey)
+	mux.HandleFunc("/feedback", srv.handleFeedback)
+	mux.HandleFunc("/feedback/vote", srv.handleFeedbackVote)
+	mux.HandleFunc("/feedback/delete", srv.handleFeedbackDelete)
 	mux.HandleFunc("/paper/", srv.handlePaper)
 	mux.HandleFunc("/abs/", srv.handleAbs)
 	mux.HandleFunc("/author/", srv.handleAuthor)
@@ -197,7 +241,9 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 	mux.HandleFunc("/sitemap-static.xml", srv.handleStaticSitemap)
 	mux.HandleFunc("/sitemaps/", srv.handlePaperSitemap)
-	mux.HandleFunc("/BingSiteAuth.xml", srv.handleBingSiteAuth)
+	if srv.bingSiteVerificationID != "" {
+		mux.HandleFunc("/BingSiteAuth.xml", srv.handleBingSiteAuth)
+	}
 	if srv.indexNowKey != "" {
 		mux.HandleFunc("/"+srv.indexNowKey+".txt", srv.handleIndexNowKey)
 	}
@@ -209,27 +255,66 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/admin", srv.handleAdminDashboard)
 	mux.HandleFunc("/admin/users", srv.handleAdminUsers)
 	mux.HandleFunc("/admin/audit", srv.handleAdminAudit)
-	mux.HandleFunc("/admin/embeddings", srv.handleAdminEmbeddings)
+	mux.HandleFunc("/admin/feedback", srv.handleAdminFeedback)
+	mux.HandleFunc("/admin/feedback/status", srv.handleAdminFeedbackStatus)
 
 	// Setup middleware
 	cacheMW := newCacheMiddleware(5 * time.Minute)                      // Cache for 5 minutes
 	rateLimiter := newRateLimiter(1000, time.Minute, trustProxyHeaders) // Allow higher burst per IP
 
 	// Apply middleware: rate limiting first, then caching/security headers.
-	handler := securityHeadersMiddleware(rateLimiter.Handler(cacheMW.Handler(mux)))
+	var handler http.Handler = securityHeadersMiddleware(rateLimiter.Handler(csrfProtectionMiddleware(cacheMW.Handler(mux))))
+	if *localMode {
+		handler = localBrowserProtectionMiddleware(handler)
+	}
 
-	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Starting server at http://localhost%s", addr)
-	log.Printf("API available at http://localhost%s/api/v1/", addr)
+	addr := serveAddress(*port, *localMode)
+	log.Printf("Starting server on %s", addr)
+	log.Printf("API available at http://%s/api/v1/", publicLogAddress(addr, *port))
 
-	httpServer := &http.Server{Addr: addr, Handler: handler}
+	httpServer := newHTTPServer(addr, handler)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
-		httpServer.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("graceful server shutdown failed: %v", err)
+			if closeErr := httpServer.Close(); closeErr != nil {
+				log.Printf("forced server shutdown failed: %v", closeErr)
+			}
+		}
 	}()
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
+	}
+	if ctx.Err() != nil {
+		<-shutdownDone
+	}
+}
+
+func serveAddress(port int, localMode bool) string {
+	if localMode {
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	return fmt.Sprintf(":%d", port)
+}
+
+func publicLogAddress(addr string, port int) string {
+	if strings.HasPrefix(addr, ":") {
+		return fmt.Sprintf("localhost:%d", port)
+	}
+	return addr
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 }
 
@@ -242,21 +327,26 @@ type server struct {
 	paperBroadcast *paperBroadcaster
 
 	// Embedding service configuration
-	embeddingServiceURL     string
 	qwenEmbeddingServiceURL string
-	embeddingWorker         *arxiv.EmbeddingWorker
+	qwenAsyncWorkerEnabled  bool
 	indexNowKey             string
 	officialArxivPapers     int64
 	officialArxivAsOf       string
+	googleAnalyticsID       string
+	bingSiteVerificationID  string
 	trustProxyHeaders       bool
 	publicEmbeddingLimiter  *rateLimiter
 	loginLimiter            *rateLimiter
+	feedbackLimiter         *rateLimiter
+	pdfSearchLimiter        *rateLimiter
+	pdfSearchSem            chan struct{}
+	authorGraphBuildMu      sync.Mutex
 }
 
 func configuredIndexNowKey() string {
 	key := strings.TrimSpace(os.Getenv("INDEXNOW_KEY"))
 	if key == "" {
-		key = defaultIndexNowKey
+		return ""
 	}
 	if !isSafeIndexNowKey(key) {
 		log.Printf("INDEXNOW_KEY contains unsupported characters; IndexNow key file route disabled")
@@ -295,6 +385,25 @@ func configuredOfficialArxivPapersAsOf() string {
 	value := strings.TrimSpace(os.Getenv("ARXIV_OFFICIAL_TOTAL_PAPERS_AS_OF"))
 	if value == "" {
 		return defaultOfficialArxivPapersAsOf
+	}
+	return value
+}
+
+func configuredPublicID(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return ""
+	}
+	if len(value) > 128 {
+		log.Printf("%s is too long; integration disabled", name)
+		return ""
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_' {
+			continue
+		}
+		log.Printf("%s contains unsupported characters; integration disabled", name)
+		return ""
 	}
 	return value
 }
@@ -420,6 +529,30 @@ func (b *paperBroadcaster) Broadcast(event paperEvent) {
 	}
 }
 
+func (s *server) publishPaper(event paperEvent) {
+	s.paperBroadcast.Broadcast(event)
+	queuePath := strings.TrimSpace(os.Getenv("INDEXNOW_QUEUE_FILE"))
+	if queuePath == "" || strings.TrimSpace(event.Paper.ID) == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(queuePath), 0o700); err != nil {
+		log.Printf("create IndexNow queue directory: %v", err)
+		return
+	}
+	queue, err := os.OpenFile(queuePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		log.Printf("open IndexNow queue: %v", err)
+		return
+	}
+	_, writeErr := fmt.Fprintln(queue, arxiv.SiteBaseURL()+"/abs/"+url.PathEscape(event.Paper.ID))
+	closeErr := queue.Close()
+	if writeErr != nil {
+		log.Printf("append IndexNow queue: %v", writeErr)
+	} else if closeErr != nil {
+		log.Printf("close IndexNow queue: %v", closeErr)
+	}
+}
+
 // paperWithEmbedding wraps a paper with its embedding status for templates
 type paperWithEmbedding struct {
 	arxiv.Paper
@@ -448,6 +581,12 @@ func (s *server) staticSitemapURLs(ctx context.Context) (arxiv.SitemapURLSet, er
 			LastMod:    &now,
 			ChangeFreq: "daily",
 			Priority:   0.8,
+		},
+		arxiv.SitemapURL{
+			Loc:        base + "/feedback",
+			LastMod:    &now,
+			ChangeFreq: "weekly",
+			Priority:   0.5,
 		},
 	)
 
@@ -534,6 +673,11 @@ func rejectNonGetHead(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+func writeServerError(w http.ResponseWriter, status int, publicMessage, operation string, err error) {
+	log.Printf("%s: %v", operation, err)
+	http.Error(w, publicMessage, status)
+}
+
 // handleSitemap serves the sitemap index at /sitemap.xml.
 func (s *server) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	if rejectNonGetHead(w, r) {
@@ -542,13 +686,13 @@ func (s *server) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	index, err := s.sitemapIndex(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "build sitemap index", err)
 		return
 	}
 
 	data, err := arxiv.BuildSitemapIndexXML(index)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "encode sitemap index", err)
 		return
 	}
 
@@ -563,13 +707,13 @@ func (s *server) handleStaticSitemap(w http.ResponseWriter, r *http.Request) {
 
 	urls, err := s.staticSitemapURLs(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "build static sitemap", err)
 		return
 	}
 
 	data, err := arxiv.BuildSitemapXML(urls)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "encode static sitemap", err)
 		return
 	}
 
@@ -601,13 +745,13 @@ func (s *server) handlePaperSitemap(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "build paper sitemap", err)
 		return
 	}
 
 	data, err := arxiv.BuildSitemapXML(urls)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "sitemap unavailable", "encode paper sitemap", err)
 		return
 	}
 
@@ -649,16 +793,19 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	stats, err := s.cache.Stats(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "page unavailable", "load index stats", err)
 		return
 	}
 
 	// Papers are now loaded via SSE in the client
 	data := map[string]any{
-		"Title":    "Home",
-		"Stats":    stats,
-		"Coverage": s.coverageSignal(stats),
-		"Query":    "",
+		"Title":          "Search arXiv Papers",
+		"Description":    homeDescription(),
+		"CanonicalURL":   canonicalURL("/"),
+		"StructuredData": homeStructuredData(),
+		"Stats":          stats,
+		"Coverage":       s.coverageSignal(stats),
+		"Query":          "",
 	}
 	s.renderTemplate(w, r, "index", data)
 }
@@ -666,6 +813,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // handleAPIRoot renders a simple HTML overview for /api/v1/.
 // The actual JSON endpoints live under /api/v1/papers, /api/v1/search, etc.
 func (s *server) handleAPIRoot(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if r.URL.Path != "/api/v1/" {
 		http.NotFound(w, r)
 		return
@@ -675,12 +823,22 @@ func (s *server) handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"Title":   "API",
 		"BaseURL": base,
+		"MCPURL":  strings.TrimRight(base, "/") + "/mcp",
+	}
+	if user, ok := s.sessionUser(r); ok {
+		apiKey, err := s.cache.ActiveUserAPIKey(r.Context(), user.ID, "Agent access")
+		if err != nil {
+			log.Printf("api page api key lookup failed: %v", err)
+		}
+		data["CurrentUser"] = user
+		data["APIKeyRecord"] = apiKey
+		data["APIKeyMasked"] = arxiv.MaskAPIKey(apiKey)
 	}
 	s.renderTemplate(w, r, "api", data)
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
@@ -693,12 +851,17 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if author, ok := authorQueryCandidate(query); ok && s.cache.CountPapersByAuthor(ctx, author) > 0 {
+		http.Redirect(w, r, authorPath(author), http.StatusFound)
+		return
+	}
 	searchMode := normalizeSearchMode(r)
+	category := r.URL.Query().Get("category")
 
 	if r.URL.Query().Get("format") == "json" {
 		papers, err := s.cache.Search(ctx, query, "", 100)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "search unavailable", "search JSON papers", err)
 			return
 		}
 
@@ -728,7 +891,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	var data map[string]any
 
-	if searchMode == "search" || searchMode == "deep" {
+	if searchMode == "semantic" || searchMode == "deep" {
 		if searchMode == "deep" {
 			if _, ok := s.currentUser(r); !ok {
 				http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
@@ -738,11 +901,31 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 		stats, err := s.cache.Stats(ctx)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "search unavailable", "load search stats", err)
 			return
 		}
 
 		if stats.QwenEmbeddingsCount == 0 {
+			if searchMode != "deep" {
+				papers, _, searchErr := quickSearchPapers(ctx, s.cache, query, category, 100)
+				if searchErr != nil {
+					writeServerError(w, http.StatusInternalServerError, "search unavailable", "run warmup quick search", searchErr)
+					return
+				}
+				data = map[string]any{
+					"Title":           "Search",
+					"Query":           query,
+					"SearchMode":      "quick",
+					"IsSemantic":      false,
+					"IsDeep":          false,
+					"Papers":          papers,
+					"SemanticResults": []arxiv.SemanticResult{},
+					"DeepResults":     []arxiv.DeepSearchResult{},
+					"SearchNotice":    "Search is warming up; showing Quick matches.",
+				}
+				s.renderTemplate(w, r, "search", data)
+				return
+			}
 			data = map[string]any{
 				"Title":           "Search",
 				"Query":           query,
@@ -760,14 +943,34 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
-			http.Error(w, "Failed to understand query: "+err.Error(), http.StatusServiceUnavailable)
+			if searchMode == "deep" {
+				writeServerError(w, http.StatusServiceUnavailable, "search service unavailable", "generate deep-search query embedding", err)
+				return
+			}
+			papers, _, searchErr := quickSearchPapers(ctx, s.cache, query, category, 100)
+			if searchErr != nil {
+				writeServerError(w, http.StatusInternalServerError, "search unavailable", "run fallback quick search", searchErr)
+				return
+			}
+			data = map[string]any{
+				"Title":           "Search",
+				"Query":           query,
+				"SearchMode":      "quick",
+				"IsSemantic":      false,
+				"IsDeep":          false,
+				"Papers":          papers,
+				"SemanticResults": []arxiv.SemanticResult{},
+				"DeepResults":     []arxiv.DeepSearchResult{},
+				"SearchNotice":    "Idea search is unavailable; showing Quick matches.",
+			}
+			s.renderTemplate(w, r, "search", data)
 			return
 		}
 
 		if searchMode == "deep" {
 			deepResults, err := s.cache.SearchDeepQwen(ctx, queryEmbedding, 100)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, http.StatusInternalServerError, "search unavailable", "run deep search", err)
 				return
 			}
 			data = map[string]any{
@@ -783,7 +986,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		} else {
 			semanticResults, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, 100)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeServerError(w, http.StatusInternalServerError, "search unavailable", "run semantic search", err)
 				return
 			}
 			data = map[string]any{
@@ -798,9 +1001,9 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		papers, err := s.cache.Search(ctx, query, "", 100)
+		papers, _, err := quickSearchPapers(ctx, s.cache, query, category, 100)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "search unavailable", "run quick search", err)
 			return
 		}
 
@@ -855,12 +1058,12 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		opts := &arxiv.DownloadOptions{DownloadPDF: false, DownloadSource: s.localMode}
 		paper, err := s.cache.FetchAndDownload(ctx, paperID, opts)
 		if err != nil {
-			http.Error(w, "failed to fetch paper: "+err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "failed to fetch paper", "fetch and download paper", err)
 			return
 		}
 
 		// Broadcast new paper to all SSE subscribers
-		s.paperBroadcast.Broadcast(paperEvent{
+		s.publishPaper(paperEvent{
 			Paper:        *paper,
 			HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 		})
@@ -875,7 +1078,7 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		paperID := strings.TrimSuffix(path, "/graph")
 		graph, err := s.cache.GetCitationGraph(ctx, paperID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "citation graph unavailable", "load citation graph", err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -893,9 +1096,10 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 			// Synchronous prefetch - blocks until all titles are fetched
 			err := s.cache.PrefetchReferenceTitles(ctx, paperID)
 			if err != nil {
+				log.Printf("prefetch reference titles: %v", err)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				json.NewEncoder(w).Encode(map[string]string{"error": "reference prefetch failed"})
 				return
 			}
 			// Return JSON for AJAX requests
@@ -921,7 +1125,7 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 			// Download source only (not PDF)
 			opts := &arxiv.DownloadOptions{DownloadPDF: false, DownloadSource: true}
 			if err := s.cache.DownloadPaper(ctx, paperID, opts); err != nil {
-				http.Error(w, "failed to fetch source: "+err.Error(), http.StatusInternalServerError)
+				writeServerError(w, http.StatusInternalServerError, "failed to fetch source", "download paper source", err)
 				return
 			}
 			http.Redirect(w, r, "/paper/"+paperID, http.StatusSeeOther)
@@ -954,7 +1158,7 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		paperID := strings.TrimSuffix(path, "/refs")
 		dbRefs, err := s.cache.References(ctx, paperID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "references unavailable", "load paper references", err)
 			return
 		}
 		type refJSON struct {
@@ -1065,11 +1269,12 @@ func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) 
 			opts := &arxiv.DownloadOptions{DownloadPDF: false, DownloadSource: s.localMode}
 			paper, err = s.cache.FetchAndDownload(ctx, id, opts)
 			if err != nil {
-				http.Error(w, "Paper not found: "+err.Error(), http.StatusNotFound)
+				log.Printf("paper fetch failed for %q: %v", id, err)
+				http.Error(w, "paper not found", http.StatusNotFound)
 				return
 			}
 			// Broadcast new paper to all SSE subscribers
-			s.paperBroadcast.Broadcast(paperEvent{
+			s.publishPaper(paperEvent{
 				Paper:        *paper,
 				HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 			})
@@ -1173,7 +1378,7 @@ func (s *server) handleAuthor(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	papers, err := s.cache.SearchByAuthor(ctx, author, 200)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "author page unavailable", "search papers by author", err)
 		return
 	}
 
@@ -1216,14 +1421,14 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 		// First ensure paper metadata exists (fetch if needed)
 		paper, err := s.cache.Fetch(ctx, paperID)
 		if err != nil {
-			http.Error(w, "failed to fetch paper: "+err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "failed to fetch paper", "fetch paper for PDF", err)
 			return
 		}
 
 		// Download PDF
 		opts := &arxiv.DownloadOptions{DownloadPDF: true, DownloadSource: false}
 		if err := s.cache.DownloadPaper(ctx, paper.ID, opts); err != nil {
-			http.Error(w, "failed to download PDF: "+err.Error(), http.StatusInternalServerError)
+			writeServerError(w, http.StatusInternalServerError, "failed to download PDF", "download paper PDF", err)
 			return
 		}
 
@@ -1241,7 +1446,8 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 
 	paper, err := s.cache.Fetch(ctx, paperID)
 	if err != nil {
-		http.Error(w, "paper not found: "+err.Error(), http.StatusNotFound)
+		log.Printf("PDF metadata fetch failed for %q: %v", paperID, err)
+		http.Error(w, "paper not found", http.StatusNotFound)
 		return
 	}
 
@@ -1250,7 +1456,7 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 		if !paper.PDFDownloaded || paper.PDFPath == "" {
 			opts := &arxiv.DownloadOptions{DownloadPDF: true, DownloadSource: false}
 			if err := s.cache.DownloadPaper(ctx, paper.ID, opts); err != nil {
-				http.Error(w, "failed to download PDF: "+err.Error(), http.StatusInternalServerError)
+				writeServerError(w, http.StatusInternalServerError, "failed to download PDF", "download missing paper PDF", err)
 				return
 			}
 			if p2, err := s.cache.GetPaperFresh(ctx, paperID); err == nil {
@@ -1397,12 +1603,12 @@ func (s *server) handleBingSiteAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.bingSiteVerificationID == "" {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.Write([]byte(`<?xml version="1.0"?>
-<users>
-    <user>5D13814D95915D6874F1138BE444F2ED</user>
-</users>
-`))
+	fmt.Fprintf(w, "<?xml version=\"1.0\"?>\n<users>\n    <user>%s</user>\n</users>\n", s.bingSiteVerificationID)
 }
 
 func (s *server) handleIndexNowKey(w http.ResponseWriter, r *http.Request) {
@@ -1488,6 +1694,27 @@ func categoryPath(category string) string {
 
 func canonicalURL(path string) string {
 	return strings.TrimRight(arxiv.SiteBaseURL(), "/") + path
+}
+
+func homeDescription() string {
+	return "Search papers cached by arXiv.gg by ID, author, keyword, or research idea. Explore citation context, official PDF links, and semantic related-work maps where prepared."
+}
+
+func homeStructuredData() template.JS {
+	base := strings.TrimRight(arxiv.SiteBaseURL(), "/")
+	data := map[string]any{
+		"@context":    "https://schema.org",
+		"@type":       "WebSite",
+		"name":        "arXiv.gg",
+		"url":         base + "/",
+		"description": homeDescription(),
+		"potentialAction": map[string]any{
+			"@type":       "SearchAction",
+			"target":      base + "/search?q={search_term_string}",
+			"query-input": "required name=search_term_string",
+		},
+	}
+	return jsonScript(data)
 }
 
 func summaryText(s string, maxRunes int) string {
@@ -1834,41 +2061,7 @@ func parseYYMM(yy, mm string) (year, month int) {
 // isArxivID checks if a string looks like a valid arXiv ID.
 // Matches: YYMM.NNNNN, YYMM.NNNNNN, or category/NNNNNNN (e.g., hep-th/9901001)
 func isArxivID(s string) bool {
-	s = strings.TrimSpace(s)
-	// New format: YYMM.NNNNN or YYMM.NNNNNN
-	if idx := strings.Index(s, "."); idx == 4 {
-		yymm := s[:4]
-		rest := s[5:]
-		// Check YYMM is numeric
-		for _, c := range yymm {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-		// Check rest is numeric and reasonable length (5-6 digits)
-		if len(rest) < 4 || len(rest) > 6 {
-			return false
-		}
-		for _, c := range rest {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-		return true
-	}
-	// Old format: category/NNNNNNN (e.g., hep-th/9901001)
-	if idx := strings.Index(s, "/"); idx > 0 {
-		rest := s[idx+1:]
-		if len(rest) >= 7 {
-			for _, c := range rest {
-				if c < '0' || c > '9' {
-					return false
-				}
-			}
-			return true
-		}
-	}
-	return false
+	return arxiv.ValidArxivID(s)
 }
 
 // extractArxivID extracts an arXiv ID from various input formats:
@@ -1934,7 +2127,7 @@ func (s *server) handleCategory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	papers, err := s.cache.ListPapers(ctx, category, 0, 200)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "category unavailable", "list category papers", err)
 		return
 	}
 
@@ -1954,7 +2147,7 @@ func (s *server) handleCategories(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	categories, err := s.cache.ListCategories(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeServerError(w, http.StatusInternalServerError, "categories unavailable", "list categories", err)
 		return
 	}
 
@@ -1965,11 +2158,4 @@ func (s *server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		"Categories":   categories,
 	}
 	s.renderTemplate(w, r, "categories", data)
-}
-
-func (s *server) handleAdminEmbeddings(w http.ResponseWriter, r *http.Request) {
-	if !s.localMode && !s.requireAdmin(w, r) {
-		return
-	}
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }

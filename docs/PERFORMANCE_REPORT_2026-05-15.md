@@ -1,5 +1,7 @@
 # arxiv.gg Performance Report - 2026-05-15
 
+> **ARCHIVED MEASUREMENT SNAPSHOT.** Timings, Lighthouse scores, traffic shape, database size, and bottlenecks below were measured on 2026-05-15 and are not current service-level claims. Retain them only as a historical baseline; rerun measurements against the present release before making performance decisions.
+
 ## Scope
 
 Measurements were taken against the live public site at `https://arxiv.gg` after the production hardening redeploy on 2026-05-15. These are synthetic checks from the production host through the public Cloudflare route, plus one Lighthouse run. They are useful as a baseline, but they are not a substitute for real-user monitoring from multiple regions and devices.
@@ -95,7 +97,7 @@ Patch:
 Observed impact for `q=transformer&limit=10`:
 
 - Before: roughly 126-179 ms total, 371 KB observed response, and production error log noise.
-- After: roughly 83-95 ms total, 18.5 KB observed response, no placeholder error in the follow-up log scan.
+- After: roughly 83-95 ms total, 18.5 KB observed response, with no fallback error in the follow-up log scan.
 
 ## Follow-Up Fixes
 

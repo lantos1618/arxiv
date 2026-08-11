@@ -40,13 +40,13 @@ type Paper struct {
 	License string
 
 	// PDFPath is the local path to the PDF (if downloaded)
-	PDFPath string `gorm:"column:pdf_path"`
+	PDFPath string `gorm:"column:pdf_path" json:"-"`
 
 	// SourcePath is the local path to the TeX source (if downloaded)
-	SourcePath string `gorm:"column:src_path"`
+	SourcePath string `gorm:"column:src_path" json:"-"`
 
 	// PDFText is extracted text from PDF for search
-	PDFText string `gorm:"type:text;column:pdf_text"`
+	PDFText string `gorm:"type:text;column:pdf_text" json:"-"`
 
 	// PDFDownloaded indicates if the PDF has been downloaded
 	PDFDownloaded bool `gorm:"column:pdf_downloaded"`
@@ -96,7 +96,8 @@ func (SyncState) TableName() string {
 	return "sync_state"
 }
 
-// DownloadQueueItem represents a queued download.
+// DownloadQueueItem is the legacy migration shape for the abandoned download
+// queue. New code must not create or report these rows.
 type DownloadQueueItem struct {
 	PaperID   string `gorm:"primaryKey;column:paper_id"`
 	Type      string
@@ -142,7 +143,7 @@ func (EmbeddingV2) TableName() string {
 	return "embeddings_v2"
 }
 
-// PaperChunk stores section/chunk text for future full-paper semantic search.
+// PaperChunk stores section/chunk text for full-paper semantic search.
 type PaperChunk struct {
 	ID            string    `gorm:"primaryKey;column:id"`
 	PaperID       string    `gorm:"column:paper_id;index"`
@@ -176,6 +177,63 @@ type ChunkEmbeddingV2 struct {
 
 func (ChunkEmbeddingV2) TableName() string {
 	return "chunk_embeddings_v2"
+}
+
+// QwenEmbeddingJobStatus represents the lifecycle of a Qwen JIT job.
+type QwenEmbeddingJobStatus string
+
+const (
+	QwenEmbeddingJobQueued   QwenEmbeddingJobStatus = "queued"
+	QwenEmbeddingJobRunning  QwenEmbeddingJobStatus = "running"
+	QwenEmbeddingJobComplete QwenEmbeddingJobStatus = "complete"
+	QwenEmbeddingJobFailed   QwenEmbeddingJobStatus = "failed"
+)
+
+const (
+	QwenEmbeddingJobKindAbstract        = "abstract"
+	QwenEmbeddingJobKindPaperChunks     = "paper_chunks"
+	QwenEmbeddingJobKindChunkEmbeddings = "chunk_embeddings"
+	QwenEmbeddingJobKindQuery           = "query"
+)
+
+// QwenEmbeddingJob queues the on-demand Qwen work needed for a paper.
+type QwenEmbeddingJob struct {
+	ID          string                 `gorm:"primaryKey;column:id" json:"id"`
+	PaperID     string                 `gorm:"column:paper_id;uniqueIndex:idx_qwen_embedding_jobs_target;index" json:"paperId"`
+	Kind        string                 `gorm:"column:kind;uniqueIndex:idx_qwen_embedding_jobs_target;index" json:"kind"`
+	Scope       string                 `gorm:"column:scope;uniqueIndex:idx_qwen_embedding_jobs_target;index" json:"scope"`
+	Model       string                 `gorm:"column:model;uniqueIndex:idx_qwen_embedding_jobs_target" json:"model"`
+	Dim         int                    `gorm:"column:dim;uniqueIndex:idx_qwen_embedding_jobs_target" json:"dim"`
+	Status      QwenEmbeddingJobStatus `gorm:"column:status;default:queued;index" json:"status"`
+	Priority    int                    `gorm:"column:priority;default:0;index" json:"priority"`
+	Attempts    int                    `gorm:"column:attempts;default:0" json:"attempts"`
+	LeaseOwner  string                 `gorm:"column:lease_owner;index" json:"leaseOwner,omitempty"`
+	LeaseUntil  *time.Time             `gorm:"column:lease_until;index" json:"leaseUntil,omitempty"`
+	LastError   string                 `gorm:"column:last_error" json:"lastError,omitempty"`
+	CreatedAt   time.Time              `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
+	UpdatedAt   time.Time              `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`
+	CompletedAt *time.Time             `gorm:"column:completed_at;index" json:"completedAt,omitempty"`
+}
+
+func (QwenEmbeddingJob) TableName() string {
+	return "qwen_embedding_jobs"
+}
+
+// QwenQueryEmbedding stores cached query vectors for JIT semantic/deep search.
+type QwenQueryEmbedding struct {
+	QueryHash     string    `gorm:"primaryKey;column:query_hash"`
+	QueryText     string    `gorm:"column:query_text;type:text"`
+	Model         string    `gorm:"primaryKey;column:model"`
+	Dim           int       `gorm:"primaryKey;column:dim"`
+	TextChars     int       `gorm:"column:text_chars"`
+	TokenEstimate int       `gorm:"column:token_estimate"`
+	Created       time.Time `gorm:"column:created;autoCreateTime"`
+	Updated       time.Time `gorm:"column:updated;autoUpdateTime"`
+	// Vector is managed via raw SQL (pgvector type in PostgreSQL)
+}
+
+func (QwenQueryEmbedding) TableName() string {
+	return "qwen_query_embeddings"
 }
 
 // EmbeddingJobStatus represents the status of an embedding job.
@@ -233,16 +291,18 @@ func (AuthorEmbedding) TableName() string {
 
 // User represents a signed-in arXiv.gg account.
 type User struct {
-	ID            string     `gorm:"primaryKey;column:id"`
-	Email         string     `gorm:"column:email;uniqueIndex"`
-	Name          string     `gorm:"column:name"`
-	PictureURL    string     `gorm:"column:picture_url"`
-	EmailVerified bool       `gorm:"column:email_verified;default:false"`
-	AuthProvider  string     `gorm:"column:auth_provider"`
-	Plan          string     `gorm:"column:plan;index;default:free"`
-	CreatedAt     time.Time  `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt     time.Time  `gorm:"column:updated_at;autoUpdateTime"`
-	LastLoginAt   *time.Time `gorm:"column:last_login_at"`
+	ID            string `gorm:"primaryKey;column:id"`
+	Email         string `gorm:"column:email;uniqueIndex"`
+	Name          string `gorm:"column:name"`
+	PictureURL    string `gorm:"column:picture_url"`
+	EmailVerified bool   `gorm:"column:email_verified;default:false"`
+	AuthProvider  string `gorm:"column:auth_provider"`
+	// Plan is an informational access label. No paid lifecycle or billing state
+	// is implemented by the core package.
+	Plan        string     `gorm:"column:plan;index;default:free"`
+	CreatedAt   time.Time  `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at;autoUpdateTime"`
+	LastLoginAt *time.Time `gorm:"column:last_login_at"`
 }
 
 func (User) TableName() string {
@@ -282,6 +342,24 @@ func (UserSession) TableName() string {
 	return "user_sessions"
 }
 
+// UserAPIKey stores hashed API keys for signed-in agent and REST access.
+type UserAPIKey struct {
+	ID         string     `gorm:"primaryKey;column:id"`
+	UserID     string     `gorm:"column:user_id;index"`
+	Name       string     `gorm:"column:name"`
+	KeyHash    string     `gorm:"column:key_hash;uniqueIndex"`
+	Prefix     string     `gorm:"column:prefix"`
+	LastFour   string     `gorm:"column:last_four"`
+	CreatedAt  time.Time  `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt  time.Time  `gorm:"column:updated_at;autoUpdateTime"`
+	LastUsedAt *time.Time `gorm:"column:last_used_at;index"`
+	RevokedAt  *time.Time `gorm:"column:revoked_at;index"`
+}
+
+func (UserAPIKey) TableName() string {
+	return "user_api_keys"
+}
+
 // UserPaperView stores a compact per-user reading history.
 type UserPaperView struct {
 	UserID        string    `gorm:"primaryKey;column:user_id"`
@@ -297,7 +375,38 @@ func (UserPaperView) TableName() string {
 	return "user_paper_views"
 }
 
-// AdminAuditLog records human admin reads and future admin mutations.
+// FeedbackPost stores community answers to the pricing/product feedback prompt.
+type FeedbackPost struct {
+	ID          string     `gorm:"primaryKey;column:id"`
+	UserID      string     `gorm:"column:user_id;index"`
+	Body        string     `gorm:"column:body;type:text"`
+	DisplayName string     `gorm:"column:display_name"`
+	Anonymous   bool       `gorm:"column:anonymous;default:false;index"`
+	OpenToCall  bool       `gorm:"column:open_to_call;default:false;index"`
+	Status      string     `gorm:"column:status;default:visible;index"`
+	HiddenAt    *time.Time `gorm:"column:hidden_at;index"`
+	HiddenBy    string     `gorm:"column:hidden_by"`
+	CreatedAt   time.Time  `gorm:"column:created_at;autoCreateTime;index"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (FeedbackPost) TableName() string {
+	return "feedback_posts"
+}
+
+// FeedbackVote stores one signed-in up/down vote per feedback post.
+type FeedbackVote struct {
+	UserID    string    `gorm:"primaryKey;column:user_id"`
+	PostID    string    `gorm:"primaryKey;column:post_id;index"`
+	Value     int       `gorm:"column:value;default:1;index"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
+}
+
+func (FeedbackVote) TableName() string {
+	return "feedback_votes"
+}
+
+// AdminAuditLog records admin page views and moderation actions.
 type AdminAuditLog struct {
 	ID         string    `gorm:"primaryKey;column:id"`
 	AdminEmail string    `gorm:"column:admin_email;index"`

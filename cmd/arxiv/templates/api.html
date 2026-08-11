@@ -13,11 +13,71 @@
 pre.example { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; }
 pre.example code { background: none; color: inherit; }
 .badge-new { background: #10b981; color: white; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; margin-left: 0.5rem; }
+.agent-panel { margin: 1.25rem 0 2rem; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; background: #fff; }
+.agent-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.85rem 1rem; border-bottom: 1px solid #e5e7eb; background: #f9fafb; }
+.agent-tabs { display: inline-flex; gap: 0.25rem; padding: 0.2rem; background: #eef2f7; border-radius: 8px; }
+.agent-tab { border: 0; border-radius: 6px; padding: 0.45rem 0.75rem; font: inherit; font-size: 0.82rem; color: #4b5563; background: transparent; cursor: pointer; }
+.agent-tab[aria-selected="true"] { background: #fff; color: #111827; box-shadow: 0 1px 2px rgba(17,24,39,0.12); font-weight: 600; }
+.agent-copy-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.agent-copy-btn { border: 1px solid #111827; background: #111827; color: #fff; border-radius: 6px; padding: 0.45rem 0.75rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+.agent-copy-btn.secondary { background: #fff; color: #111827; border-color: #d1d5db; }
+.agent-body { padding: 1rem; display: grid; gap: 0.85rem; }
+.agent-terminal { background: #111827; color: #f9fafb; border-radius: 8px; overflow: hidden; border: 1px solid #030712; }
+.agent-terminal-bar { display: flex; align-items: center; gap: 0.35rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.55); font-size: 0.72rem; }
+.agent-dot { width: 0.65rem; height: 0.65rem; border-radius: 999px; display: inline-block; }
+.agent-dot.red { background: #ff5f57; }
+.agent-dot.yellow { background: #febc2e; }
+.agent-dot.green { background: #28c840; }
+.agent-terminal-title { margin-left: auto; margin-right: auto; }
+.agent-prompt { margin: 0; padding: 1rem; white-space: pre-wrap; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; color: #f3f4f6; }
+.agent-task { display: grid; gap: 0.35rem; }
+.agent-task label { font-size: 0.82rem; color: #374151; font-weight: 600; }
+.agent-task textarea { width: 100%; box-sizing: border-box; min-height: 4rem; resize: vertical; border: 1px solid #d1d5db; border-radius: 6px; padding: 0.65rem; font: inherit; }
+.agent-copy-status { min-height: 1.2rem; font-size: 0.82rem; color: #047857; }
+.agent-account { font-size: 0.86rem; color: #4b5563; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 0.65rem 0.75rem; }
+.agent-account code { word-break: break-all; }
+@media (max-width: 640px) {
+	.agent-panel-header { align-items: stretch; flex-direction: column; }
+	.agent-tabs, .agent-copy-row { width: 100%; }
+	.agent-tab, .agent-copy-btn { flex: 1; }
+}
 </style>
 
 <h1>API Documentation</h1>
 <p>This instance exposes a JSON-based REST API under <code>/api/v1/</code>. All responses use the format:</p>
 <pre class="example"><code>{ "success": true, "data": { ... }, "error": "..." }</code></pre>
+
+<div class="agent-panel" id="agent-setup" data-base-url="{{.BaseURL}}" data-mcp-url="{{.MCPURL}}" data-api-key="{{if .APIKey}}{{.APIKey}}{{end}}" data-api-key-mask="{{if .APIKeyMasked}}{{.APIKeyMasked}}{{end}}" data-signed-in="{{if .CurrentUser}}true{{else}}false{{end}}">
+	<div class="agent-panel-header">
+		<div class="agent-tabs" role="tablist" aria-label="Agent setup">
+			<button class="agent-tab" type="button" role="tab" aria-selected="true" data-agent-tab="codex">Codex</button>
+			<button class="agent-tab" type="button" role="tab" aria-selected="false" data-agent-tab="claude">Claude</button>
+			<button class="agent-tab" type="button" role="tab" aria-selected="false" data-agent-tab="mcp">MCP</button>
+		</div>
+		<div class="agent-copy-row">
+			<button class="agent-copy-btn" type="button" data-agent-copy="prompt">Copy prompt</button>
+			<button class="agent-copy-btn secondary" type="button" data-agent-copy="config">Copy config</button>
+			<button class="agent-copy-btn secondary" type="button" data-agent-copy="url">Copy URL</button>
+		</div>
+	</div>
+	<div class="agent-body">
+		<div class="agent-terminal">
+			<div class="agent-terminal-bar">
+				<span class="agent-dot red"></span>
+				<span class="agent-dot yellow"></span>
+				<span class="agent-dot green"></span>
+				<span class="agent-terminal-title" id="agent-terminal-title">Codex</span>
+			</div>
+			<pre class="agent-prompt" id="agent-prompt"></pre>
+		</div>
+		<div class="agent-task">
+			<label for="agent-task-detail">Give the agent more detail</label>
+			<textarea id="agent-task-detail" placeholder="Example: improve the paper search API client, add tests, and use arxiv_gg MCP tools for live endpoint checks."></textarea>
+		</div>
+		<div class="agent-account" id="agent-account-note"></div>
+		<div class="agent-copy-status" id="agent-copy-status" aria-live="polite"></div>
+	</div>
+</div>
 
 <div class="api-section">
 <h3>Papers</h3>
@@ -44,6 +104,12 @@ pre.example code { background: none; color: inherit; }
 </div>
 
 <div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/papers/{id}/similar</code>
+	<div class="desc">Get semantically related papers and related-work map data.</div>
+	<div class="params">Query: <code>limit</code> (default: 80, max: 160). Requires the paper to be ready for related-work search.</div>
+</div>
+
+<div class="endpoint">
 	<span class="method post">POST</span> <code>/api/v1/papers/{id}/fetch</code>
 	<div class="desc">Fetch and cache a paper from arXiv.</div>
 	<div class="params">Query: <code>pdf=true</code>, <code>source=true</code> (default), <code>embedding=true</code></div>
@@ -65,17 +131,23 @@ pre.example code { background: none; color: inherit; }
 </div>
 
 <div class="endpoint">
+	<span class="method">GET</span> <code>/api/v1/search/quick</code>
+	<div class="desc">Quick lookup for IDs, titles, authors, keywords, and categories.</div>
+	<div class="params">Query: <code>q</code> (required), <code>limit</code> (default: 10)</div>
+</div>
+
+<div class="endpoint">
 	<span class="method">GET</span> <code>/api/v1/search/stream</code><span class="badge-new">NEW</span>
-	<div class="desc">Stream search results via Server-Sent Events (SSE) for real-time UI updates.</div>
-	<div class="params">Query: <code>q</code> (required), <code>category</code>, <code>limit</code> (default: 20)</div>
+	<div class="desc">Stream Quick, Search, or Deep results via Server-Sent Events (SSE) for real-time UI updates.</div>
+	<div class="params">Query: <code>q</code> (required), <code>mode=quick|search|deep</code> (default: <code>search</code>), <code>category</code>, <code>limit</code> (default: 100)</div>
 	<div class="params">Header: <code>Accept: text/event-stream</code></div>
 </div>
 
 <div class="endpoint">
 	<span class="method">GET</span> <code>/api/v1/search/semantic</code><span class="badge-new">NEW</span>
-	<div class="desc">Semantic search using vector similarity. Finds papers by concept, not just keywords.</div>
+	<div class="desc">Search ideas across abstracts using vector similarity.</div>
 	<div class="params">Query: <code>q</code> (required), <code>limit</code> (default: 20)</div>
-	<div class="params">Requires embeddings to be generated first.</div>
+	<div class="params">Falls back to Quick results with <code>fallback=true</code> when abstract Search is unavailable.</div>
 </div>
 
 <div class="endpoint">
@@ -90,12 +162,12 @@ pre.example code { background: none; color: inherit; }
 
 <div class="endpoint">
 	<span class="method post">POST</span> <code>/api/v1/papers/{id}/embeddings</code>
-	<div class="desc">Generate embedding for a single paper (enables semantic search for this paper).</div>
+	<div class="desc">Generate a paper profile. Response includes <code>hasEmbedding</code>, <code>mapReady</code>, and <code>generator</code>.</div>
 </div>
 
 <div class="endpoint">
 	<span class="method post">POST</span> <code>/api/v1/embeddings/generate</code>
-	<div class="desc">Generate embeddings for all papers in cache.</div>
+	<div class="desc">Legacy bulk generation is retired. Prepare one paper with <code>POST /api/v1/papers/{id}/embeddings</code>; the request may return queued status.</div>
 	<div class="params">Query: <code>limit</code> (optional, process only N papers)</div>
 	<div class="params">Header: <code>Accept: text/event-stream</code> for SSE progress updates</div>
 </div>
@@ -139,7 +211,140 @@ curl "{{.BaseURL}}/api/v1/papers/1706.03762/export/bibtex"</code></pre>
 
 <p style="margin-top: 2rem;">For complete API documentation, see: <a href="https://github.com/lantos1618/arxiv.gg/blob/main/docs/API.md" target="_blank" rel="noopener noreferrer">API.md on GitHub</a></p>
 
+<script>
+(function() {
+	const panel = document.getElementById('agent-setup');
+	if (!panel) return;
+	const baseURL = panel.dataset.baseUrl || window.location.origin;
+	const mcpURL = panel.dataset.mcpUrl || (baseURL.replace(/\/$/, '') + '/mcp');
+	const apiKey = panel.dataset.apiKey || '';
+	const apiKeyMask = panel.dataset.apiKeyMask || '';
+	const signedIn = panel.dataset.signedIn === 'true';
+	const apiURL = baseURL.replace(/\/$/, '') + '/api/v1/';
+	const loginURL = baseURL.replace(/\/$/, '') + '/login';
+	const accountURL = baseURL.replace(/\/$/, '') + '/account';
+	const tabs = Array.from(panel.querySelectorAll('[data-agent-tab]'));
+	const promptEl = document.getElementById('agent-prompt');
+	const titleEl = document.getElementById('agent-terminal-title');
+	const taskEl = document.getElementById('agent-task-detail');
+	const statusEl = document.getElementById('agent-copy-status');
+	const accountNoteEl = document.getElementById('agent-account-note');
+	let activeTab = 'codex';
+
+	function taskText() {
+		const value = taskEl.value.trim();
+		return value || 'Explore the arXiv.gg API, use the MCP tools when useful, and propose or implement the requested improvement with focused tests.';
+	}
+
+	function codexConfig() {
+		let config = '[mcp_servers.arxiv_gg]\nurl = "' + mcpURL + '"\ntool_timeout_sec = 60\n';
+		if (apiKey) {
+			config += 'http_headers = { Authorization = "Bearer ' + apiKey + '" }\n';
+		}
+		return config;
+	}
+
+	function claudeConfig() {
+		const config = {
+			type: 'url',
+			name: 'arxiv_gg',
+			url: mcpURL
+		};
+		if (apiKey) {
+			config.headers = { Authorization: 'Bearer ' + apiKey };
+		}
+		return JSON.stringify(config, null, 2);
+	}
+
+	function authInstruction() {
+		if (apiKey) {
+			return 'Use this account API key for authenticated REST and MCP calls:\nAuthorization: Bearer ' + apiKey + '\n\n';
+		}
+		if (apiKeyMask) {
+			return 'This account has an active API key (' + apiKeyMask + '), but the full key is only shown when created. Open ' + accountURL + ' and regenerate the key if the agent needs authenticated access.\n\n';
+		}
+		if (signedIn) {
+			return 'Open ' + accountURL + ' to create an API key before authenticated agent work.\n\n';
+		}
+		return 'If the workflow needs account access, sign in at ' + loginURL + ' and copy the API key from Account.\n\n';
+	}
+
+	function promptFor(tab) {
+		const task = taskText();
+		if (tab === 'claude') {
+			return 'Make sure the arxiv_gg MCP connector is connected: ' + mcpURL + '\n\n' +
+				authInstruction() +
+				'Use arxiv_gg MCP tools first for live arXiv.gg context, then use the REST API at ' + apiURL + ' when raw endpoints are better.\n\n' +
+				'Implement: ' + task;
+		}
+		if (tab === 'mcp') {
+			return 'MCP server: ' + mcpURL + '\nAPI root: ' + apiURL + '\nLogin: ' + loginURL + '\n\n' +
+				authInstruction() +
+				'Available tools: arxiv_api_overview, arxiv_account, arxiv_search, arxiv_get_paper, arxiv_related_papers.\n\n' +
+				'Public tools do not require login. Account and Deep Search flows require a session cookie or API key.';
+		}
+		return 'Make sure the arxiv_gg MCP server is connected.\n\n' +
+			'Codex config (~/.codex/config.toml):\n' + codexConfig() + '\n' +
+			'In Codex, run /mcp to verify arxiv_gg is active. ' + authInstruction() +
+			'Use arxiv_gg MCP tools for paper lookup, search, metadata, citations, and related-work maps. REST API root: ' + apiURL + '\n\n' +
+			'Implement: ' + task;
+	}
+
+	function configFor(tab) {
+		if (tab === 'claude') return claudeConfig();
+		if (tab === 'mcp') {
+			if (apiKey) return mcpURL + '\nAuthorization: Bearer ' + apiKey + '\n';
+			return mcpURL;
+		}
+		return codexConfig();
+	}
+
+	function render() {
+		tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.agentTab === activeTab)));
+		titleEl.textContent = activeTab === 'claude' ? 'Claude' : activeTab === 'mcp' ? 'MCP server' : 'Codex';
+		promptEl.textContent = promptFor(activeTab);
+		if (apiKey) {
+			accountNoteEl.innerHTML = 'Signed in. Agent prompts include <code>Authorization: Bearer ' + apiKeyMask + '</code>.';
+		} else if (apiKeyMask) {
+			accountNoteEl.innerHTML = 'Signed in with active key <code>' + apiKeyMask + '</code>. Regenerate it from <a href="/account">Account</a> to copy the full key.';
+		} else if (signedIn) {
+			accountNoteEl.innerHTML = 'Signed in. Open <a href="/account">Account</a> to create an API key for authenticated agent work.';
+		} else {
+			accountNoteEl.innerHTML = 'Sign in to add an account API key to these prompts.';
+		}
+	}
+
+	async function copyText(text, label) {
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch (err) {
+			const area = document.createElement('textarea');
+			area.value = text;
+			area.setAttribute('readonly', '');
+			area.style.position = 'fixed';
+			area.style.left = '-9999px';
+			document.body.appendChild(area);
+			area.select();
+			document.execCommand('copy');
+			area.remove();
+		}
+		statusEl.textContent = label + ' copied.';
+		window.setTimeout(() => { statusEl.textContent = ''; }, 1800);
+	}
+
+	tabs.forEach(tab => {
+		tab.addEventListener('click', () => {
+			activeTab = tab.dataset.agentTab;
+			render();
+		});
+	});
+	taskEl.addEventListener('input', render);
+	panel.querySelector('[data-agent-copy="prompt"]').addEventListener('click', () => copyText(promptFor(activeTab), 'Prompt'));
+	panel.querySelector('[data-agent-copy="config"]').addEventListener('click', () => copyText(configFor(activeTab), 'Config'));
+	panel.querySelector('[data-agent-copy="url"]').addEventListener('click', () => copyText(mcpURL, 'MCP URL'));
+	render();
+})();
+</script>
+
 {{template "foot" .}}
 {{end}}
-
-

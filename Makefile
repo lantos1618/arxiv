@@ -1,6 +1,6 @@
 # arXiv Cache Manager Makefile
 
-.PHONY: all build test test-verbose test-cover lint fmt vet clean install help
+.PHONY: all build test test-verbose test-cover lint fmt vet clean install help docker docker-run migrations-preflight migrations-status migrations-apply
 
 # Default target
 all: test build
@@ -68,19 +68,22 @@ tidy:
 deps:
 	go mod download
 
-# Generate embeddings (requires Python)
-embeddings:
-	@which python3 > /dev/null || (echo "Python3 required for embeddings" && exit 1)
-	@test -f tools/requirements.txt && pip3 install -r tools/requirements.txt || true
-	python3 tools/generate_embeddings.py
-
 # Build Docker image
 docker:
-	docker build -t arxiv-cache .
+	docker compose build arxiv
 
 # Run Docker container (production)
 docker-run:
-	docker run -d --name arxiv-container --restart unless-stopped -p 80:80 -v /data/arxiv:/data/arxiv arxiv-cache
+	docker compose up -d --build
+
+migrations-preflight:
+	tools/sql_migrations.sh preflight
+
+migrations-status:
+	tools/sql_migrations.sh status
+
+migrations-apply:
+	tools/sql_migrations.sh apply
 
 # Benchmark tests
 bench:
@@ -111,5 +114,7 @@ help:
 	@echo "  make docker       - Build Docker image"
 	@echo "  make docker-run   - Run Docker container"
 	@echo "  make bench        - Run benchmarks"
-	@echo "  make embeddings   - Generate embeddings (requires Python)"
+	@echo "  make migrations-preflight - Validate ordered SQL migrations"
+	@echo "  make migrations-status    - Show SQL migration state"
+	@echo "  make migrations-apply     - Apply pending SQL migrations"
 	@echo "  make help         - Show this help"

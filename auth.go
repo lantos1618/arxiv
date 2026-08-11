@@ -130,7 +130,7 @@ func (c *Cache) ConsumeLoginCode(ctx context.Context, email, code string) (*User
 		return nil, fmt.Errorf("invalid or expired code")
 	}
 
-	user, err := c.FindOrCreateUser(ctx, normalized, "", "", false, "email", now)
+	user, err := c.FindOrCreateUser(ctx, normalized, "", "", true, "email", now)
 	if err != nil {
 		return nil, err
 	}

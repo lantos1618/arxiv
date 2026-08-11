@@ -14,21 +14,20 @@
 	.admin-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 	.admin-table th, .admin-table td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.45rem; text-align: left; vertical-align: top; }
 	.admin-table th { color: #374151; font-weight: 700; background: #f9fafb; }
-	.placeholder-row td, .placeholder { color: #92400e; background: #fffbeb; }
 	.status-real { color: #047857; font-weight: 700; }
-	.status-placeholder { color: #92400e; font-weight: 700; }
 	@media (max-width: 640px) {
 		.admin-table { display: block; overflow-x: auto; white-space: nowrap; }
 	}
 </style>
 
 <h1>Admin</h1>
-<p class="inline-notice">Read-only ops dashboard. Values below are database-backed unless the row says <strong>PLACEHOLDER</strong>.</p>
+<p class="inline-notice">Live operational overview from the application database. Metrics refresh in the background and may lag active workers by about a minute.</p>
 
 <div class="admin-tabs">
 	<a class="active" href="/admin">Overview</a>
 	<a href="/admin/users">Users</a>
 	<a href="/admin/audit">Audit</a>
+	<a href="/admin/feedback">Feedback</a>
 </div>
 
 <div class="admin-section">
@@ -37,22 +36,17 @@
 		<div class="admin-metric">
 			<div class="admin-metric-label">Database</div>
 			<div class="admin-metric-value">{{.Stats.DBType}}</div>
-			<div class="admin-metric-note">Live connection passed startup.</div>
+			<div class="admin-metric-note">Database backend reported by the current admin snapshot.</div>
 		</div>
 		<div class="admin-metric">
 			<div class="admin-metric-label">Papers</div>
 			<div class="admin-metric-value">{{formatInt .Stats.Cache.TotalPapers}}</div>
-			<div class="admin-metric-note">Real rows in papers.</div>
+			<div class="admin-metric-note">Rows currently stored in the papers table.</div>
 		</div>
 		<div class="admin-metric">
 			<div class="admin-metric-label">Full abstracts</div>
 			<div class="admin-metric-value">{{formatInt .Stats.Embeddings.FullAbstracts}}</div>
 			<div class="admin-metric-note">{{percent .Stats.Embeddings.FullAbstracts .Stats.Cache.TotalPapers}} have title + abstract text.</div>
-		</div>
-		<div class="admin-metric">
-			<div class="admin-metric-label">MiniLM embeddings</div>
-			<div class="admin-metric-value">{{formatInt .Stats.Embeddings.MiniLMAbstracts}}</div>
-			<div class="admin-metric-note">{{percent .Stats.Embeddings.MiniLMAbstracts .Stats.Embeddings.FullAbstracts}} of full abstracts.</div>
 		</div>
 		<div class="admin-metric">
 			<div class="admin-metric-label">Qwen abstracts</div>
@@ -72,74 +66,65 @@
 	</div>
 </div>
 
-<div class="admin-section">
-	<h2>Embedding Progress</h2>
+	<div class="admin-section">
+		<h2>Embedding Progress</h2>
+	<p class="admin-metric-note">Database-backed counts from the latest admin snapshot. The snapshot refreshes in the background, so these numbers can trail active workers by up to about a minute.</p>
 	<table class="admin-table">
-		<thead><tr><th>Track</th><th>Done</th><th>Remaining</th><th>Source</th></tr></thead>
+		<thead><tr><th>Track</th><th>Done</th><th>Remaining</th><th>Coverage</th><th>Source</th></tr></thead>
 		<tbody>
 			<tr>
 				<td>Full abstracts available</td>
 				<td>{{formatInt .Stats.Embeddings.FullAbstracts}}</td>
 				<td>{{formatInt .Stats.Embeddings.MissingAbstractText}}</td>
-				<td><span class="status-real">REAL</span> papers with title + abstract text</td>
+				<td>{{percent .Stats.Embeddings.FullAbstracts .Stats.Cache.TotalPapers}}</td>
+				<td>papers rows with title and abstract text</td>
 			</tr>
 			<tr>
 				<td>Full-paper text extraction</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperTexts}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaperFetch}}</td>
-				<td><span class="status-real">REAL</span> papers.pdf_text rows; fetched by the full-paper worker</td>
+				<td>{{percent .Stats.Embeddings.FullPaperTexts .Stats.Cache.TotalPapers}}</td>
+				<td>papers rows with extracted pdf_text</td>
 			</tr>
 			<tr>
 				<td>Full-paper text chunking</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperChunked}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaperText}}</td>
-				<td><span class="status-real">REAL</span> extracted PDF texts not yet chunked</td>
-			</tr>
-			<tr>
-				<td>Abstract semantic search, MiniLM 384d</td>
-				<td>{{formatInt .Stats.Embeddings.MiniLMAbstracts}}</td>
-				<td>{{formatInt .Stats.Embeddings.PendingMiniLM}}</td>
-				<td><span class="status-real">REAL</span> embeddings table</td>
+				<td>{{percent .Stats.Embeddings.FullPaperChunked .Stats.Embeddings.FullPaperTexts}}</td>
+				<td>papers with extracted PDF text and paper_chunks rows</td>
 			</tr>
 			<tr>
 				<td>Abstract semantic search, Qwen 1024d</td>
 				<td>{{formatInt .Stats.Embeddings.QwenAbstracts}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingQwenAbstract}}</td>
-				<td><span class="status-real">REAL</span> embeddings_v2 abstract rows</td>
+				<td>{{percent .Stats.Embeddings.QwenAbstracts .Stats.Embeddings.FullAbstracts}}</td>
+				<td>embeddings_v2 rows with abstract scope</td>
 			</tr>
 			<tr>
 				<td>Full-paper chunks</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperChunks}}</td>
-				<td>-</td>
-				<td><span class="status-real">REAL</span> paper_chunks rows</td>
+				<td>Not applicable</td>
+				<td>Not applicable</td>
+				<td>Chunk volume; coverage is measured by papers chunked in the row above</td>
 			</tr>
 			<tr>
 				<td>Full-paper chunk embeddings</td>
 				<td>{{formatInt .Stats.Embeddings.FullPaperEmbeddings}}</td>
 				<td>{{formatInt .Stats.Embeddings.PendingFullPaper}}</td>
-				<td><span class="status-real">REAL</span> chunk_embeddings_v2 rows</td>
+				<td>{{percent .Stats.Embeddings.FullPaperEmbeddings .Stats.Embeddings.FullPaperChunks}}</td>
+				<td>chunk_embeddings_v2 rows</td>
 			</tr>
 		</tbody>
 	</table>
 </div>
 
 <div class="admin-section">
-	<h2>MiniLM Job Queue</h2>
-	<div class="admin-kpis">
-		<div class="admin-metric"><div class="admin-metric-label">Pending</div><div class="admin-metric-value">{{formatInt (mapInt .Stats.EmbeddingJobs "pending")}}</div></div>
-		<div class="admin-metric"><div class="admin-metric-label">Processing</div><div class="admin-metric-value">{{formatInt (mapInt .Stats.EmbeddingJobs "processing")}}</div></div>
-		<div class="admin-metric"><div class="admin-metric-label">Completed</div><div class="admin-metric-value">{{formatInt (mapInt .Stats.EmbeddingJobs "completed")}}</div></div>
-		<div class="admin-metric"><div class="admin-metric-label">Failed</div><div class="admin-metric-value">{{formatInt (mapInt .Stats.EmbeddingJobs "failed")}}</div></div>
-	</div>
-</div>
-
-<div class="admin-section">
 	<h2>Users And Plans</h2>
 	<div class="admin-kpis">
-		<div class="admin-metric"><div class="admin-metric-label">Users</div><div class="admin-metric-value">{{formatInt .Stats.Users.TotalUsers}}</div><div class="admin-metric-note">Google sign-ins.</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Account rows</div><div class="admin-metric-value">{{formatInt .Stats.Users.TotalUsers}}</div><div class="admin-metric-note">All records in users.</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Active 24h</div><div class="admin-metric-value">{{formatInt .Stats.Users.Active24h}}</div><div class="admin-metric-note">Recent sessions.</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Free</div><div class="admin-metric-value">{{formatInt .Stats.Users.FreeUsers}}</div><div class="admin-metric-note">users.plan = free</div></div>
-		<div class="admin-metric"><div class="admin-metric-label">Paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div><div class="admin-metric-note">users.plan = paid</div></div>
+		<div class="admin-metric"><div class="admin-metric-label">Plan label: paid</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaidUsers}}</div><div class="admin-metric-note">users.plan = paid; this does not confirm billing or payment.</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Paper views</div><div class="admin-metric-value">{{formatInt .Stats.Users.PaperViews}}</div><div class="admin-metric-note">Signed-in reading history.</div></div>
 		<div class="admin-metric"><div class="admin-metric-label">Viewers 7d</div><div class="admin-metric-value">{{formatInt .Stats.Users.Viewers7d}}</div><div class="admin-metric-note">Users who opened papers.</div></div>
 	</div>
@@ -152,27 +137,11 @@
 		<thead><tr><th>Plan</th><th>Who</th><th>Access</th><th>Billing</th></tr></thead>
 		<tbody>
 			{{range .Plans}}
-			<tr {{if .Placeholder}}class="placeholder-row"{{end}}>
+			<tr>
 				<td>{{.Plan}}</td>
 				<td>{{.Who}}</td>
 				<td>{{.Access}}</td>
 				<td>{{.Billing}}</td>
-			</tr>
-			{{end}}
-		</tbody>
-	</table>
-</div>
-
-<div class="admin-section">
-	<h2>Not Wired Yet</h2>
-	<table class="admin-table">
-		<thead><tr><th>Area</th><th>Status</th><th>Why</th></tr></thead>
-		<tbody>
-			{{range .Placeholders}}
-			<tr class="placeholder-row">
-				<td>{{.Area}}</td>
-				<td><span class="status-placeholder">{{.What}}</span></td>
-				<td>{{.Why}}</td>
 			</tr>
 			{{end}}
 		</tbody>

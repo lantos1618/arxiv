@@ -8,19 +8,19 @@
 	.admin-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 	.admin-table th, .admin-table td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.45rem; text-align: left; vertical-align: top; }
 	.admin-table th { color: #374151; font-weight: 700; background: #f9fafb; }
-	.placeholder-row td { color: #92400e; background: #fffbeb; }
 	@media (max-width: 760px) {
 		.admin-table { display: block; overflow-x: auto; white-space: nowrap; }
 	}
 </style>
 
 <h1>Admin Audit</h1>
-<p class="inline-notice">Read-only audit trail for admin page views. Future admin mutations should write here too.</p>
+<p class="inline-notice">Audit trail for admin page views and moderation actions.</p>
 
 <div class="admin-tabs">
 	<a href="/admin">Overview</a>
 	<a href="/admin/users">Users</a>
 	<a class="active" href="/admin/audit">Audit</a>
+	<a href="/admin/feedback">Feedback</a>
 </div>
 
 <div class="admin-section">
@@ -38,9 +38,6 @@
 			{{else}}
 			<tr><td colspan="5">No admin audit rows yet.</td></tr>
 			{{end}}
-			<tr class="placeholder-row">
-				<td colspan="5">PLACEHOLDER: app-level user activity and payment events are not tracked in this table yet.</td>
-			</tr>
 		</tbody>
 	</table>
 </div>

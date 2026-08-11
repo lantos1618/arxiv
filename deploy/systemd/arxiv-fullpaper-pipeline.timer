@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the arXiv full-paper pipeline periodically
+
+[Timer]
+OnBootSec=5m
+OnUnitInactiveSec=10m
+RandomizedDelaySec=1m
+Persistent=true
+Unit=arxiv-fullpaper-pipeline.service
+
+[Install]
+WantedBy=timers.target

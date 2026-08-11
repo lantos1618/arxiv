@@ -1,73 +1,104 @@
 # arxiv CLI
 
-The `arxiv` command is the local toolkit behind arxiv.gg. It can fetch papers, sync arXiv metadata, search the cache, generate embeddings, rebuild indexes, and run the web server locally.
+This reference is derived from `cmd/arxiv/main.go` and `cmd/arxiv/serve.go`.
 
-## Usage
+## Build
 
 ```bash
-arxiv <command> [options]
+go build -o bin/arxiv ./cmd/arxiv
+./bin/arxiv help
 ```
+
+`ARXIV_CACHE` selects the file cache root and defaults to `~/.cache/arxiv`. `DATABASE_URL` selects PostgreSQL when non-empty; an empty value selects the legacy SQLite database at `$ARXIV_CACHE/index.db`. Use PostgreSQL with pgvector for supported deployments.
 
 ## Commands
 
-```text
-fetch      Fetch and download specific papers
-sync       Sync paper metadata from arXiv OAI-PMH
-stats      Show cache statistics
-search     Search cached papers
-get        Get a specific paper's info
-ls         List cached papers
-reindex    Rebuild search index, citations, and embeddings
-serve      Start the web server
-```
+### `fetch`
 
-## Environment
+Fetch metadata and files for one or more paper IDs:
 
 ```text
-ARXIV_CACHE    Cache directory, default ~/.cache/arxiv
-DATABASE_URL   Optional PostgreSQL connection string; SQLite is used when unset
+arxiv fetch [-pdf] [-source=true] [-all] [-with-embedding] <paper-id> [paper-id...]
 ```
 
-## Fetching Papers
+- `-source` downloads TeX source and defaults to `true`.
+- `-pdf` downloads the PDF and extracts text.
+- `-all` downloads source and PDF.
+- `-with-embedding` queues the canonical Qwen abstract and full-paper preparation jobs.
+
+### `sync`
+
+Sync metadata through arXiv OAI-PMH:
+
+```text
+arxiv sync [-set cs] [-from YYYY-MM-DD] [-batch 1000]
+```
+
+This syncs metadata, not every PDF or source archive. Interruptions resume from durable sync state.
+
+### `stats`
+
+```text
+arxiv stats
+```
+
+Print paper, PDF, source, and queued-download counts.
+
+### `search`
+
+```text
+arxiv search [-category cs.AI] [-limit 20] "query"
+```
+
+Runs database full-text search across cached metadata. Qwen idea/deep search is exposed through the web/API interfaces, not this CLI command.
+
+### `get`
+
+```text
+arxiv get [-fetch] <paper-id>
+```
+
+Reads one cached paper. `-fetch` retrieves missing metadata from arXiv.
+
+### `list` / `ls`
+
+```text
+arxiv ls [-cat cs.AI] [-n 50] [-src] [-a] [category]
+```
+
+- `-src` requires downloaded source.
+- `-a` includes metadata-only papers.
+- `-n 0` means no explicit result limit.
+
+### `reindex`
+
+```text
+arxiv reindex
+```
+
+Rebuilds the full-text index and citation data. The former `-embeddings` MiniLM path is retired and returns an error; use the Qwen pipeline in [SEMANTIC_SEARCH.md](SEMANTIC_SEARCH.md) for current semantic data.
+
+### `serve`
+
+```text
+arxiv serve [-port 8080] [-local]
+```
+
+- `-local` enables local PDF/source caching, bypasses production privileged checks, and binds to loopback.
+- MiniLM service and worker flags have been removed. Qwen workers run through the documented worker pipeline.
+- `QWEN_EMBEDDING_SERVICE_URL` configures a synchronous Qwen service when available; otherwise Qwen query/abstract work can be queued for remote workers.
+
+Normal serving listens on all interfaces. Put it behind a trusted ingress and configure authentication before exposing it.
+
+## Migration Command
+
+`cmd/migrate` is a separate SQLite-to-PostgreSQL utility:
 
 ```bash
-arxiv fetch 2301.00001
-arxiv fetch -pdf 2301.00001
-arxiv fetch -all 2301.00001
-arxiv fetch --with-embedding 2301.00001
+go run ./cmd/migrate \
+  -sqlite /path/to/index.db \
+  -postgres "$DATABASE_URL" \
+  -batch 500
 ```
 
-## Syncing Metadata
-
-```bash
-arxiv sync
-arxiv sync -set cs
-arxiv sync -from 2024-01-01
-```
-
-## Searching
-
-```bash
-arxiv search "transformer attention"
-arxiv search -category cs.CL "language model"
-arxiv search -limit 50 "neural network"
-```
-
-## Web Server
-
-```bash
-arxiv serve
-arxiv serve -port 3000
-```
-
-The web server exposes the browser UI and the `/api/v1` REST API.
-
-## Embeddings
-
-```bash
-arxiv reindex --embeddings
-arxiv reindex --embeddings --limit 1000
-python3 tools/generate_embeddings.py "$ARXIV_CACHE" --limit 1000
-```
-
-Embeddings enable semantic search over paper titles and abstracts.
+The PostgreSQL URL is required through `-postgres` or `DATABASE_URL`. Rehearse against a disposable database and back up the target before use.

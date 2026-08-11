@@ -1,181 +1,73 @@
-# Contributing to arXiv Cache Manager
+# Contributing to arxiv.gg
 
-Thank you for your interest in contributing to the arXiv Cache Manager! This document provides guidelines and instructions for contributing.
+Thanks for contributing. Keep changes focused, explain user-visible behavior, and avoid presenting experimental or legacy paths as supported production features.
 
-## Code of Conduct
+## Prerequisites
 
-Please be respectful and constructive in all interactions. We aim to maintain a welcoming environment for all contributors.
+- Go 1.25, matching `go.mod`
+- PostgreSQL with pgvector for production-path development
+- Python 3 and a CUDA-capable environment when changing Qwen workers
+- `pdftotext` from Poppler when changing PDF ingestion
+- SQLite only for the existing legacy/unit-test path
 
-## Getting Started
+## Setup
 
-### Prerequisites
-
-- Go 1.18 or later
-- SQLite with FTS5 support
-- `pdftotext` (from poppler-utils) for PDF text extraction
-- Python 3.8+ (optional, for embedding generation)
-
-### Setting Up Development Environment
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/lantos1618/arxiv.gg.git
-   cd arxiv
-   ```
-
-2. Install dependencies:
-   ```bash
-   go mod download
-   ```
-
-3. Run tests to verify setup:
-   ```bash
-   make test
-   ```
-
-## Development Workflow
-
-### Making Changes
-
-1. Create a new branch for your feature or fix:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. Make your changes following the coding standards below.
-
-3. Run tests and checks:
-   ```bash
-   make check
-   ```
-
-4. Commit your changes with a clear, descriptive message:
-   ```bash
-   git commit -m "Add feature: description of changes"
-   ```
-
-### Coding Standards
-
-#### Go Code
-
-- Follow standard Go conventions and idioms
-- Use `gofmt` to format code (run `make fmt`)
-- Run `go vet` before committing (run `make vet`)
-- Write tests for new functionality
-- Keep functions focused and small
-- Document exported types, functions, and methods
-- Use meaningful variable and function names
-- Handle errors explicitly - don't ignore them
-
-#### File Organization
-
-```
-arxiv/
-├── *.go              # Main package files
-├── *_test.go         # Test files
-├── internal/         # Internal packages
-│   ├── cache/        # Cache management
-│   ├── citations/    # Citation handling
-│   ├── data/         # Data operations
-│   ├── export/       # Export formats
-│   └── search/       # Search functionality
-├── cmd/arxiv/        # CLI application
-├── tools/            # Utility scripts
-└── docs/             # Documentation
+```bash
+git clone https://github.com/lantos1618/arxiv.gg.git
+cd arxiv.gg
+go mod download
+go test ./...
+go build -o bin/arxiv ./cmd/arxiv
 ```
 
-#### Testing
+Use an explicit PostgreSQL URL for application and integration work:
 
-- Write table-driven tests when appropriate
-- Use subtests for related test cases
-- Test both success and error paths
-- Use `t.TempDir()` for temporary test directories
-- Mock external dependencies when possible
-
-Example test structure:
-```go
-func TestFunction(t *testing.T) {
-    testCases := []struct {
-        name     string
-        input    string
-        expected string
-    }{
-        {"valid input", "foo", "bar"},
-        {"empty input", "", ""},
-    }
-    
-    for _, tc := range testCases {
-        t.Run(tc.name, func(t *testing.T) {
-            result := Function(tc.input)
-            if result != tc.expected {
-                t.Errorf("got %s, want %s", result, tc.expected)
-            }
-        })
-    }
-}
+```bash
+export ARXIV_CACHE="$PWD/.cache/arxiv"
+export DATABASE_URL='postgres://arxiv:password@127.0.0.1:5432/arxiv?sslmode=disable'
+./bin/arxiv serve -port 8080
 ```
 
-### Pull Request Process
+Clearing `DATABASE_URL` selects SQLite. Do that only for tests or deliberate legacy-backend checks; do not infer production correctness from a SQLite pass.
 
-1. Ensure all tests pass: `make test`
-2. Run code checks: `make check`
-3. Update documentation if needed
-4. Create a pull request with:
-   - Clear title describing the change
-   - Description of what and why (not just how)
-   - Reference to related issues (if any)
+## Development Rules
 
-### Commit Messages
+- Run `gofmt` on changed Go files and follow existing package boundaries.
+- Keep API errors safe for public clients; log operational detail server-side.
+- Preserve request cancellation and bound public request size, limits, and fan-out.
+- Treat queue claims, leases, completion, retries, and database/cache transitions as concurrency-sensitive.
+- Use Qwen (`Qwen/Qwen3-Embedding-8B`, 1,024 dimensions) for current semantic features. MiniLM files and the original embedding table are compatibility code, not a second supported architecture.
+- Never put secrets in source, examples, command arguments, logs, or committed `.env` files.
+- Do not add claims about coverage, performance, plans, pricing, or awards without current evidence and precise conditions.
 
-Write clear, concise commit messages:
+## Tests
 
+Start narrow, then run the full checks:
+
+```bash
+go test ./... -run TestName
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
 ```
-Add semantic search with embedding support
 
-- Implement cosine similarity for vector comparison
-- Add StoreEmbedding and GetEmbedding methods
-- Support hybrid search combining FTS5 and semantic
+Changes to PostgreSQL SQL, semantic search, OAuth, proxy trust, deployment, or workers also need focused integration validation. See [docs/TESTING.md](docs/TESTING.md).
 
-Fixes #123
-```
+## Pull Requests
 
-## Areas for Contribution
+Include:
 
-### Good First Issues
+1. The problem and intended behavior.
+2. The files and interfaces changed.
+3. Tests and manual validation performed.
+4. PostgreSQL, migration, security, privacy, and deployment impact.
+5. Any follow-up work that remains genuinely out of scope.
 
-- Adding more tests
-- Improving documentation
-- Fixing typos
-- Adding examples
+Avoid unrelated formatting or refactors. Do not commit generated binaries, runtime logs, local databases, model caches, credentials, or `.env` files.
 
-### Intermediate
+## Documentation
 
-- Implementing new export formats
-- Improving search algorithms
-- Adding CLI features
-- Performance optimizations
+Update the active docs when commands, routes, environment variables, account behavior, Qwen architecture, or deployment steps change. Date-stamped audits and reports are archived evidence: add a current disposition instead of silently rewriting historical observations as if they were new measurements.
 
-### Advanced
-
-- Native Go embedding generation
-- Distributed caching support
-- Advanced citation analysis
-- Web interface improvements
-
-## Reporting Issues
-
-When reporting issues, please include:
-
-1. Clear description of the problem
-2. Steps to reproduce
-3. Expected vs actual behavior
-4. Go version and OS
-5. Relevant error messages or logs
-
-## Questions?
-
-If you have questions about contributing, please open an issue with the "question" label.
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
+Contributions are licensed under the repository's MIT license.

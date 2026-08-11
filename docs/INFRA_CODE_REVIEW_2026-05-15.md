@@ -1,5 +1,7 @@
 # arxiv.gg Infra and Code Review
 
+> **ARCHIVED SNAPSHOT — SUPERSEDED.** This review describes the repository and infrastructure as observed on 2026-05-15. Its findings and suggested patch order must not be read as current. Use the active deployment, setup, API, semantic-search, and testing guides, and confirm any historical claim against current code.
+
 Snapshot: 2026-05-15 around 07:20 UTC
 
 Scope: local repository at `/home/ubuntu/arxiv`, live deployment observations from Docker/host inspection, and a review of the Go web/API/database paths, Python embedding service, Dockerfile, compose file, and templates.

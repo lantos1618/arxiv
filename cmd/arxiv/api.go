@@ -1,51 +1,23 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lantos1618/arxiv.gg"
+	"gorm.io/gorm"
 )
-
-// getToolsPath returns the path to a tool script.
-// In Docker: /app/tools/, locally: ./tools/ or relative to executable
-func getToolsPath(script string) string {
-	// Check Docker path first
-	dockerPath := filepath.Join("/app/tools", script)
-	if _, err := os.Stat(dockerPath); err == nil {
-		return dockerPath
-	}
-
-	// Check relative to current directory
-	localPath := filepath.Join("tools", script)
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath
-	}
-
-	// Fallback: relative to executable
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		exePath := filepath.Join(exeDir, "tools", script)
-		if _, err := os.Stat(exePath); err == nil {
-			return exePath
-		}
-	}
-
-	// Last resort: assume Docker path
-	return dockerPath
-}
 
 // APIResponse is a standard API response wrapper
 type APIResponse struct {
@@ -68,6 +40,140 @@ type similarPaperResult struct {
 	PaperID    string        `json:"paperId"`
 	Similarity float64       `json:"similarity"`
 	Paper      *paperSummary `json:"paper,omitempty"`
+}
+
+type searchMode string
+
+const (
+	searchModeQuick    searchMode = "quick"
+	searchModeKeyword  searchMode = "keyword"
+	searchModeSemantic searchMode = "semantic"
+	searchModeDeep     searchMode = "deep"
+)
+
+var arxivCategoryPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(?:\.[A-Za-z0-9-]+)?$`)
+
+func parseSearchMode(raw string, fallback searchMode) (searchMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return fallback, nil
+	case "quick":
+		return searchModeQuick, nil
+	case "keyword":
+		return searchModeKeyword, nil
+	case "semantic", "search":
+		return searchModeSemantic, nil
+	case "deep":
+		return searchModeDeep, nil
+	default:
+		return "", fmt.Errorf("invalid search mode; use quick, keyword, semantic, or deep")
+	}
+}
+
+func validateSearchCategory(category string) (string, error) {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return "", nil
+	}
+	if len(category) > 64 || !arxivCategoryPattern.MatchString(category) {
+		return "", fmt.Errorf("invalid category; use one arXiv category such as cs.AI")
+	}
+	return category, nil
+}
+
+func paperInCategory(categories, category string) bool {
+	if category == "" {
+		return true
+	}
+	for _, candidate := range strings.Fields(categories) {
+		if candidate == category {
+			return true
+		}
+	}
+	return false
+}
+
+type qwenWorkerClaimRequest struct {
+	Kinds        []string `json:"kinds"`
+	Limit        int      `json:"limit"`
+	LeaseOwner   string   `json:"leaseOwner"`
+	LeaseSeconds int      `json:"leaseSeconds"`
+}
+
+type qwenWorkerClaimedJob struct {
+	ID              string `json:"id"`
+	PaperID         string `json:"paperId"`
+	QueryHash       string `json:"queryHash,omitempty"`
+	Kind            string `json:"kind"`
+	Scope           string `json:"scope"`
+	Model           string `json:"model"`
+	Dim             int    `json:"dim"`
+	Text            string `json:"text"`
+	TextChars       int    `json:"textChars"`
+	TokenEstimate   int    `json:"tokenEstimate"`
+	Attempts        int    `json:"attempts"`
+	LeaseOwner      string `json:"leaseOwner"`
+	LeaseGeneration int    `json:"leaseGeneration"`
+	SourceHash      string `json:"sourceHash"`
+}
+
+type qwenWorkerCompleteRequest struct {
+	Embedding       []float32 `json:"embedding"`
+	LeaseOwner      string    `json:"leaseOwner,omitempty"`
+	LeaseGeneration int       `json:"leaseGeneration,omitempty"`
+	SourceHash      string    `json:"sourceHash,omitempty"`
+}
+
+type qwenWorkerFailRequest struct {
+	Error           string `json:"error"`
+	LeaseOwner      string `json:"leaseOwner,omitempty"`
+	LeaseGeneration int    `json:"leaseGeneration,omitempty"`
+}
+
+type qwenWorkerHeartbeatRequest struct {
+	LeaseOwner      string `json:"leaseOwner"`
+	LeaseGeneration int    `json:"leaseGeneration"`
+	LeaseSeconds    int    `json:"leaseSeconds"`
+}
+
+const (
+	defaultQwenWorkerLeaseSeconds = 900
+	maxQwenWorkerLeaseSeconds     = 3600
+)
+
+func normalizeQwenWorkerLeaseSeconds(seconds int) int {
+	if seconds <= 0 {
+		return defaultQwenWorkerLeaseSeconds
+	}
+	if seconds > maxQwenWorkerLeaseSeconds {
+		return maxQwenWorkerLeaseSeconds
+	}
+	return seconds
+}
+
+func qwenWorkerLeasedJobID(jobID string, generation int, sourceHash string) string {
+	leasedID := jobID + "~" + strconv.Itoa(generation)
+	if sourceHash != "" {
+		leasedID += "~" + sourceHash
+	}
+	return leasedID
+}
+
+func parseQwenWorkerLeasedJobID(value string) (string, int, string) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, "~")
+	if len(parts) < 2 {
+		return value, 0, ""
+	}
+	generation, err := strconv.Atoi(parts[1])
+	if err != nil || generation <= 0 {
+		return value, 0, ""
+	}
+	sourceHash := ""
+	if len(parts) == 3 {
+		sourceHash = parts[2]
+	}
+	return parts[0], generation, sourceHash
 }
 
 func summarizePaper(p *arxiv.Paper) *paperSummary {
@@ -123,6 +229,26 @@ func summarizeSimilarResults(results []arxiv.SemanticResult) []similarPaperResul
 	return summaries
 }
 
+func semanticMetadataCoverage(results []arxiv.SemanticResult) map[string]interface{} {
+	missing := make([]string, 0)
+	for _, result := range results {
+		if result.Paper == nil {
+			missing = append(missing, result.PaperID)
+		}
+	}
+	return map[string]interface{}{"complete": len(missing) == 0, "missingPaperIds": missing}
+}
+
+func deepMetadataCoverage(results []arxiv.DeepSearchResult) map[string]interface{} {
+	missing := make([]string, 0)
+	for _, result := range results {
+		if result.Paper == nil {
+			missing = append(missing, result.PaperID)
+		}
+	}
+	return map[string]interface{}{"complete": len(missing) == 0, "missingPaperIds": missing}
+}
+
 // setSSEHeaders sets headers for Server-Sent Events, including buffering controls
 func setSSEHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -162,6 +288,10 @@ func (s *server) handleAPIPaper(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(path, "/similar") {
 		s.handleAPISimilarPapers(w, r)
+		return
+	}
+	if strings.HasSuffix(path, "/embedding-status") {
+		s.handleAPIEmbeddingStatus(w, r)
 		return
 	}
 	if strings.HasSuffix(path, "/fetch") {
@@ -229,54 +359,136 @@ func (s *server) handleAPISearchSemantic(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
+	category, err := validateSearchCategory(r.URL.Query().Get("category"))
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
 
 	ctx := r.Context()
 
 	stats, err := s.cache.Stats(ctx)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load semantic search statistics", "search is temporarily unavailable", err)
 		return
 	}
 
 	if stats.QwenEmbeddingsCount == 0 {
-		respondJSON(w, http.StatusServiceUnavailable, APIResponse{
-			Success: false,
-			Error:   "Search is warming up. Try Quick Search for now.",
-		})
+		s.respondSemanticSearchFallback(w, r, query, category, limit, "semantic_not_ready", "Semantic search is not ready; showing Quick results.", 0)
 		return
 	}
 
 	queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 	if err != nil {
-		respondJSON(w, http.StatusServiceUnavailable, APIResponse{
-			Success: false,
-			Error:   "failed to understand query: " + err.Error(),
-		})
+		logAPIInternalError("generate semantic search query embedding", err)
+		reasonCode := "semantic_unavailable"
+		notice := "Semantic search is temporarily unavailable; showing Quick results."
+		retryAfter := 0
+		if errors.Is(err, errQwenQueryEmbeddingQueued) {
+			reasonCode = "query_embedding_queued"
+			notice = "Semantic results are being prepared; showing Quick results now."
+			retryAfter = qwenQueryRetryAfterSeconds
+		}
+		s.respondSemanticSearchFallback(w, r, query, category, limit, reasonCode, notice, retryAfter)
 		return
 	}
 
-	results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, limit)
+	candidateLimit := limit
+	if category != "" {
+		candidateLimit = min(limit*4, 400)
+	}
+	results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, candidateLimit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "semantic search", "semantic search failed", err)
 		return
 	}
+	results = filterSemanticResultsByCategory(results, category, limit)
 
 	respondJSON(w, http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"results": results,
-			"count":   len(results),
-			"query":   query,
-			"mode":    "search",
-			"model":   "Qwen3-Embedding-8B",
+			"results":  results,
+			"count":    len(results),
+			"query":    query,
+			"mode":     searchModeSemantic,
+			"category": category,
+			"model":    arxiv.QwenEmbeddingModel,
+			"metadata": semanticMetadataCoverage(results),
 		},
 	})
+}
+
+func (s *server) respondSemanticSearchFallback(w http.ResponseWriter, r *http.Request, query, category string, limit int, reasonCode, notice string, retryAfterSeconds int) {
+	papers, _, err := quickSearchPapers(r.Context(), s.cache, query, category, limit)
+	if err != nil {
+		respondAPIInternalError(w, http.StatusServiceUnavailable, "fallback search", "search is temporarily unavailable", err)
+		return
+	}
+
+	results := make([]map[string]interface{}, len(papers))
+	for i := range papers {
+		results[i] = map[string]interface{}{
+			"paperId":    papers[i].ID,
+			"paper":      papers[i],
+			"similarity": nil,
+			"fallback":   true,
+		}
+	}
+
+	respondJSON(w, http.StatusPartialContent, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"results":       results,
+			"papers":        papers,
+			"count":         len(papers),
+			"query":         query,
+			"category":      category,
+			"mode":          searchModeQuick,
+			"requestedMode": searchModeSemantic,
+			"model":         nil,
+			"fallback": map[string]interface{}{
+				"used":       true,
+				"reasonCode": reasonCode,
+				"notice":     notice,
+			},
+			"retry": map[string]interface{}{
+				"recommended":  retryAfterSeconds > 0,
+				"afterSeconds": retryAfterSeconds,
+			},
+		},
+	})
+}
+
+func filterSemanticResultsByCategory(results []arxiv.SemanticResult, category string, limit int) []arxiv.SemanticResult {
+	if category == "" && len(results) <= limit {
+		return results
+	}
+	filtered := make([]arxiv.SemanticResult, 0, min(len(results), limit))
+	for _, result := range results {
+		if result.Paper != nil && paperInCategory(result.Paper.Categories, category) {
+			filtered = append(filtered, result)
+			if len(filtered) == limit {
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func filterDeepResultsByCategory(results []arxiv.DeepSearchResult, category string, limit int) []arxiv.DeepSearchResult {
+	if category == "" && len(results) <= limit {
+		return results
+	}
+	filtered := make([]arxiv.DeepSearchResult, 0, min(len(results), limit))
+	for _, result := range results {
+		if result.Paper != nil && paperInCategory(result.Paper.Categories, category) {
+			filtered = append(filtered, result)
+			if len(filtered) == limit {
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 // handleAPISimilarPapers returns nearest neighbors for a paper embedding.
@@ -325,21 +537,19 @@ func (s *server) handleAPISimilarPapers(w http.ResponseWriter, r *http.Request) 
 
 	semanticMap, results, err := s.cache.SimilarPaperMapQwen(ctx, paperID, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load similar paper map", "similar papers unavailable", err)
 		return
 	}
 
 	respondJSON(w, http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"paper":   summarizePaper(paper),
-			"results": summarizeSimilarResults(results),
-			"map":     semanticMap,
-			"count":   len(results),
-			"model":   "Qwen3-Embedding-8B",
+			"paper":    summarizePaper(paper),
+			"results":  summarizeSimilarResults(results),
+			"map":      semanticMap,
+			"count":    len(results),
+			"model":    "Qwen3-Embedding-8B",
+			"metadata": semanticMetadataCoverage(results),
 		},
 	})
 }
@@ -360,7 +570,11 @@ func (s *server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category := r.URL.Query().Get("category")
+	category, err := validateSearchCategory(r.URL.Query().Get("category"))
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
 	limit, err := parseLimit(r, 20, 100)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, APIResponse{
@@ -373,10 +587,7 @@ func (s *server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	papers, err := s.cache.Search(ctx, query, category, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "paper search", "search is temporarily unavailable", err)
 		return
 	}
 
@@ -415,21 +626,36 @@ func (s *server) handleAPISearchQuick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	type authorSuggestion struct {
+		Name       string `json:"name"`
+		Path       string `json:"path"`
+		PaperCount int64  `json:"paperCount"`
+	}
+	authors := []authorSuggestion{}
+	if author, ok := authorQueryCandidate(query); ok {
+		if paperCount := s.cache.CountPapersByAuthor(ctx, author); paperCount > 0 {
+			authors = append(authors, authorSuggestion{
+				Name:       author,
+				Path:       authorPath(author),
+				PaperCount: paperCount,
+			})
+		}
+	}
+
 	papers, total, err := s.cache.QuickSearch(ctx, query, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "quick search", "search is temporarily unavailable", err)
 		return
 	}
 
 	respondJSON(w, http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"papers": papers,
-			"count":  len(papers),
-			"total":  total,
+			"papers":      papers,
+			"count":       len(papers),
+			"total":       total,
+			"authors":     authors,
+			"authorCount": len(authors),
 		},
 	})
 }
@@ -450,7 +676,11 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category := r.URL.Query().Get("category")
+	category, err := validateSearchCategory(r.URL.Query().Get("category"))
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
 	limit, err := parseLimit(r, 100, 100)
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, APIResponse{
@@ -460,13 +690,21 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	searchMode := normalizeSearchMode(r)
+	rawMode := r.URL.Query().Get("mode")
+	if rawMode == "" {
+		rawMode = r.URL.Query().Get("search-mode")
+	}
+	mode, err := parseSearchMode(rawMode, searchModeQuick)
+	if err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: err.Error()})
+		return
+	}
 
 	setSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		http.Error(w, "real-time streaming is unavailable", http.StatusInternalServerError)
 		return
 	}
 
@@ -475,25 +713,41 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 		"type":     "start",
 		"query":    query,
-		"mode":     searchMode,
+		"mode":     mode,
 		"category": category,
 	}))
 	flusher.Flush()
 
-	if searchMode == "search" || searchMode == "deep" {
-		if searchMode == "deep" {
+	if mode == searchModeSemantic || mode == searchModeDeep {
+		if mode == searchModeDeep {
 			if _, ok := s.currentUser(r); !ok {
 				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 					"type":  "error",
-					"error": "Sign in to use Deep Search. It is free while we test full-paper tools.",
+					"error": "Sign in to use Deep Search.",
 				}))
 				flusher.Flush()
 				return
 			}
 		}
 
-		stats, err := s.cache.Stats(ctx)
-		if err != nil || stats.QwenEmbeddingsCount == 0 {
+		ready, readinessErr := s.searchModeReady(ctx, mode)
+		if readinessErr != nil || !ready {
+			if readinessErr != nil {
+				logAPIInternalError("load streaming search readiness", readinessErr)
+			}
+			if mode != searchModeDeep {
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":          "fallback",
+					"requestedMode": searchModeSemantic,
+					"effectiveMode": searchModeQuick,
+					"reasonCode":    "semantic_not_ready",
+					"message":       "Semantic search is not ready; showing Quick results.",
+					"retry":         map[string]interface{}{"recommended": false, "afterSeconds": 0},
+				}))
+				flusher.Flush()
+				streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit, searchModeQuick)
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 				"type":  "error",
 				"error": "Search is warming up. Try Quick Search for now.",
@@ -504,17 +758,62 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 			"type":    "status",
-			"message": searchModeProgressMessage(searchMode),
+			"message": searchModeProgressMessage(string(mode)),
 		}))
 		flusher.Flush()
 
 		queryEmbedding, err := s.generateQwenQueryEmbedding(ctx, query)
 		if err != nil {
+			if errors.Is(err, errQwenQueryEmbeddingQueued) {
+				if mode == searchModeDeep {
+					fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+						"type":              "status",
+						"message":           "Deep Search is being prepared. Try again shortly.",
+						"queued":            true,
+						"retryAfterSeconds": qwenQueryRetryAfterSeconds,
+					}))
+					flusher.Flush()
+					fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+						"type":              "complete",
+						"count":             0,
+						"mode":              "deep",
+						"queued":            true,
+						"retryAfterSeconds": qwenQueryRetryAfterSeconds,
+					}))
+					flusher.Flush()
+					return
+				}
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":          "fallback",
+					"requestedMode": searchModeSemantic,
+					"effectiveMode": searchModeQuick,
+					"reasonCode":    "query_embedding_queued",
+					"message":       "Semantic results are being prepared; showing Quick results now.",
+					"retry":         map[string]interface{}{"recommended": true, "afterSeconds": qwenQueryRetryAfterSeconds},
+				}))
+				flusher.Flush()
+				streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit, searchModeQuick)
+				return
+			}
+			logAPIInternalError("generate streaming search query embedding", err)
+			if mode == searchModeDeep {
+				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+					"type":  "error",
+					"error": "Failed to understand query.",
+				}))
+				flusher.Flush()
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "error",
-				"error": "Failed to understand query: " + err.Error(),
+				"type":          "fallback",
+				"requestedMode": searchModeSemantic,
+				"effectiveMode": searchModeQuick,
+				"reasonCode":    "semantic_unavailable",
+				"message":       "Semantic search is temporarily unavailable; showing Quick results.",
+				"retry":         map[string]interface{}{"recommended": false, "afterSeconds": 0},
 			}))
 			flusher.Flush()
+			streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit, searchModeQuick)
 			return
 		}
 
@@ -524,16 +823,22 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 		}))
 		flusher.Flush()
 
-		if searchMode == "deep" {
-			results, err := s.cache.SearchDeepQwen(ctx, queryEmbedding, limit)
+		if mode == searchModeDeep {
+			candidateLimit := limit
+			if category != "" {
+				candidateLimit = min(limit*4, 400)
+			}
+			results, err := s.cache.SearchDeepQwen(ctx, queryEmbedding, candidateLimit)
 			if err != nil {
+				logAPIInternalError("stream deep search", err)
 				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 					"type":  "error",
-					"error": err.Error(),
+					"error": "Deep Search is temporarily unavailable.",
 				}))
 				flusher.Flush()
 				return
 			}
+			results = filterDeepResultsByCategory(results, category, limit)
 			for i, res := range results {
 				select {
 				case <-ctx.Done():
@@ -552,21 +857,28 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "complete",
-				"count": len(results),
-				"mode":  "deep",
+				"type":     "complete",
+				"count":    len(results),
+				"mode":     searchModeDeep,
+				"metadata": deepMetadataCoverage(results),
 			}))
 			flusher.Flush()
 		} else {
-			results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, limit)
+			candidateLimit := limit
+			if category != "" {
+				candidateLimit = min(limit*4, 400)
+			}
+			results, err := s.cache.SearchSemanticQwen(ctx, queryEmbedding, candidateLimit)
 			if err != nil {
+				logAPIInternalError("stream semantic search", err)
 				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 					"type":  "error",
-					"error": err.Error(),
+					"error": "Idea search is temporarily unavailable.",
 				}))
 				flusher.Flush()
 				return
 			}
+			results = filterSemanticResultsByCategory(results, category, limit)
 			for i, res := range results {
 				select {
 				case <-ctx.Done():
@@ -583,46 +895,82 @@ func (s *server) handleAPISearchStream(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "complete",
-				"count": len(results),
-				"mode":  "search",
+				"type":     "complete",
+				"count":    len(results),
+				"mode":     searchModeSemantic,
+				"metadata": semanticMetadataCoverage(results),
 			}))
 			flusher.Flush()
 		}
 
 	} else {
-		papers, err := s.cache.Search(ctx, query, category, limit)
-		if err != nil {
-			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":  "error",
-				"error": err.Error(),
-			}))
-			flusher.Flush()
-			return
-		}
+		streamKeywordSearchResults(ctx, w, flusher, s.cache, query, category, limit, mode)
+	}
+}
 
-		for i, paper := range papers {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-					"type":    "result",
-					"index":   i,
-					"paper":   paper,
-					"paperId": paper.ID,
-				}))
-				flusher.Flush()
-			}
-		}
-
+func streamKeywordSearchResults(ctx context.Context, w io.Writer, flusher http.Flusher, cache *arxiv.Cache, query, category string, limit int, mode searchMode) {
+	var papers []arxiv.Paper
+	var err error
+	if mode == searchModeKeyword {
+		papers, err = cache.Search(ctx, query, category, limit)
+	} else {
+		papers, _, err = quickSearchPapers(ctx, cache, query, category, limit)
+		mode = searchModeQuick
+	}
+	if err != nil {
+		logAPIInternalError("stream keyword search", err)
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "complete",
-			"count": len(papers),
-			"mode":  "quick",
+			"type":  "error",
+			"error": "Search is temporarily unavailable.",
 		}))
 		flusher.Flush()
+		return
 	}
+
+	for i, paper := range papers {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+				"type":    "result",
+				"index":   i,
+				"paper":   paper,
+				"paperId": paper.ID,
+			}))
+			flusher.Flush()
+		}
+	}
+
+	fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
+		"type":  "complete",
+		"count": len(papers),
+		"mode":  mode,
+	}))
+	flusher.Flush()
+}
+
+func quickSearchPapers(ctx context.Context, cache *arxiv.Cache, query, category string, limit int) ([]arxiv.Paper, int, error) {
+	if strings.TrimSpace(category) != "" {
+		papers, err := cache.Search(ctx, query, category, limit)
+		return papers, len(papers), err
+	}
+	return cache.QuickSearch(ctx, query, limit)
+}
+
+func (s *server) searchModeReady(ctx context.Context, mode searchMode) (bool, error) {
+	if mode == searchModeDeep {
+		stats, err := s.cache.QwenPipelineStats(ctx)
+		if err != nil {
+			return false, err
+		}
+		return stats.FullPaperChunkEmbeddings > 0, nil
+	}
+	stats, err := s.cache.Stats(ctx)
+	if err != nil {
+		return false, err
+	}
+	return stats.QwenEmbeddingsCount > 0, nil
 }
 
 func normalizeSearchMode(r *http.Request) string {
@@ -635,9 +983,45 @@ func normalizeSearchMode(r *http.Request) string {
 		return "quick"
 	case "deep", "full", "full-paper", "fullpaper":
 		return "deep"
+	case "semantic", "search":
+		return "semantic"
 	default:
-		return "search"
+		return "quick"
 	}
+}
+
+func authorQueryCandidate(query string) (string, bool) {
+	query = strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
+	if len(query) < 3 || len(query) > 80 || strings.ContainsAny(query, "/\\@?=&:") {
+		return "", false
+	}
+	parts := strings.Fields(query)
+	if len(parts) < 2 || len(parts) > 5 {
+		return "", false
+	}
+	for _, part := range parts {
+		if strings.ContainsAny(part, "0123456789") {
+			return "", false
+		}
+	}
+	if !hasAuthorNameCasing(parts) {
+		return "", false
+	}
+	return query, true
+}
+
+func hasAuthorNameCasing(parts []string) bool {
+	for _, part := range parts {
+		part = strings.TrimLeft(part, `("'[`)
+		if part == "" {
+			continue
+		}
+		ch := part[0]
+		if ch >= 'A' && ch <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 func searchModeProgressMessage(mode string) string {
@@ -667,10 +1051,7 @@ func (s *server) handleAPICitations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	refs, err := s.cache.References(ctx, path)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load paper citations", "citations unavailable", err)
 		return
 	}
 
@@ -709,10 +1090,7 @@ func (s *server) handleAPICitedBy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	citedBy, err := s.cache.CitedBy(ctx, path, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load citing papers", "citing papers unavailable", err)
 		return
 	}
 
@@ -742,10 +1120,7 @@ func (s *server) handleAPICitationGraph(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	graph, err := s.cache.GetCitationGraph(ctx, path)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load citation graph", "citation graph unavailable", err)
 		return
 	}
 
@@ -765,10 +1140,7 @@ func (s *server) handleAPICategories(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	categories, err := s.cache.ListCategories(ctx)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "list categories", "categories unavailable", err)
 		return
 	}
 
@@ -788,10 +1160,7 @@ func (s *server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	stats, err := s.cache.Stats(ctx)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load API statistics", "statistics unavailable", err)
 		return
 	}
 
@@ -856,25 +1225,19 @@ func (s *server) handleAPIFetch(w http.ResponseWriter, r *http.Request) {
 
 	paper, err := s.cache.FetchAndDownload(ctx, path, opts)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "fetch and download paper", "paper fetch failed", err)
 		return
 	}
 
 	// Broadcast new paper to all SSE subscribers
-	s.paperBroadcast.Broadcast(paperEvent{
+	s.publishPaper(paperEvent{
 		Paper:        *paper,
 		HasEmbedding: s.cache.HasQwenEmbedding(ctx, paper.ID),
 	})
 
 	if generateEmbedding {
 		if _, err := s.generatePaperEmbedding(ctx, paper); err != nil {
-			respondJSON(w, http.StatusInternalServerError, APIResponse{
-				Success: false,
-				Error:   fmt.Sprintf("failed to generate embedding: %v", err),
-			})
+			respondAPIInternalError(w, http.StatusInternalServerError, "generate fetched paper embedding", "failed to generate embedding", err)
 			return
 		}
 	}
@@ -952,6 +1315,23 @@ func (s *server) handleAPISearchPDF(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if _, ok := s.currentUser(r); !ok {
+		respondJSON(w, http.StatusUnauthorized, APIResponse{Success: false, Error: "sign in or provide an API key to use PDF search"})
+		return
+	}
+	if s.pdfSearchLimiter != nil && !s.pdfSearchLimiter.Allow(r) {
+		writeRateLimitExceeded(w, r)
+		return
+	}
+	if s.pdfSearchSem != nil {
+		select {
+		case s.pdfSearchSem <- struct{}{}:
+			defer func() { <-s.pdfSearchSem }()
+		default:
+			respondJSON(w, http.StatusTooManyRequests, APIResponse{Success: false, Error: "PDF search is busy; retry shortly"})
+			return
+		}
+	}
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -976,10 +1356,7 @@ func (s *server) handleAPISearchPDF(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	results, err := s.cache.SearchPDFs(ctx, query, limit, fuzzyMode)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "search paper PDFs", "PDF search unavailable", err)
 		return
 	}
 
@@ -1046,14 +1423,29 @@ func (s *server) handleAPIEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	generator, err := s.generatePaperEmbedding(ctx, paper)
-	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   fmt.Sprintf("failed to generate embedding: %v", err),
-		})
+	if !s.qwenExecutionConfigured() {
+		respondJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Qwen embedding execution is not configured"})
 		return
 	}
+	if strings.TrimSpace(s.qwenEmbeddingServiceURL) == "" {
+		s.respondQwenEmbeddingQueued(w, r, paper, "Qwen embedding work is queued.")
+		return
+	}
+
+	generator, err := s.generatePaperEmbedding(ctx, paper)
+	if err != nil {
+		logAPIInternalError("generate paper embedding", err)
+		if errors.Is(err, errQwenQueryEmbeddingUnavailable) {
+			respondJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Qwen embedding execution is temporarily unavailable"})
+			return
+		}
+		s.respondQwenEmbeddingQueued(w, r, paper, "Qwen worker could not finish synchronously; queued for retry.")
+		return
+	}
+	_ = s.cache.CompleteQwenPaperJob(ctx, path, arxiv.QwenEmbeddingJobKindAbstract)
+
+	mapReady := s.cache.HasQwenEmbedding(ctx, path)
+	status, _ := s.cache.QwenPaperEmbeddingStatus(ctx, path)
 
 	respondJSON(w, http.StatusOK, APIResponse{
 		Success: true,
@@ -1061,32 +1453,540 @@ func (s *server) handleAPIEmbeddings(w http.ResponseWriter, r *http.Request) {
 			"paperId":      path,
 			"paper":        paper,
 			"hasEmbedding": true,
+			"mapReady":     mapReady,
+			"status":       status,
+			"statusUrl":    "/api/v1/papers/" + path + "/embedding-status",
 			"generator":    generator,
 			"message":      "embedding generated successfully",
 		},
 	})
 }
 
+func (s *server) handleAPIEmbeddingStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	paperID := strings.TrimPrefix(r.URL.Path, "/api/v1/papers/")
+	paperID = strings.TrimSuffix(paperID, "/embedding-status")
+	if paperID == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "paper ID required",
+		})
+		return
+	}
+
+	ctx := r.Context()
+	paper, err := s.cache.GetPaper(ctx, paperID)
+	if err != nil {
+		respondJSON(w, http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   "paper not found",
+		})
+		return
+	}
+
+	status, err := s.cache.QwenPaperEmbeddingStatus(ctx, paperID)
+	if err != nil {
+		respondAPIInternalError(w, http.StatusInternalServerError, "load Qwen embedding status", "embedding status unavailable", err)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"paperId":   paperID,
+			"paper":     summarizePaper(paper),
+			"status":    status,
+			"statusUrl": "/api/v1/papers/" + paperID + "/embedding-status",
+		},
+	})
+}
+
+func (s *server) respondQwenEmbeddingQueued(w http.ResponseWriter, r *http.Request, paper *arxiv.Paper, message string) {
+	status, err := s.cache.EnsureQwenPaperJobs(r.Context(), paper.ID, 100)
+	if err != nil {
+		respondAPIInternalError(w, http.StatusInternalServerError, "queue Qwen embedding work", "failed to queue embedding work", err)
+		return
+	}
+
+	respondJSON(w, http.StatusAccepted, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"paperId":      paper.ID,
+			"paper":        summarizePaper(paper),
+			"hasEmbedding": status.AbstractReady,
+			"mapReady":     status.MapReady,
+			"queued":       true,
+			"status":       status,
+			"statusUrl":    "/api/v1/papers/" + paper.ID + "/embedding-status",
+			"message":      message,
+		},
+	})
+}
+
+func (s *server) handleAPIQwenJobClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.localMode && !s.requireQwenWorker(w, r) {
+		return
+	}
+
+	var req qwenWorkerClaimRequest
+	if r.Body != nil {
+		if err := decodeQwenWorkerBody(w, r, &req, true); err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "invalid JSON body"})
+			return
+		}
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 8 {
+		limit = 8
+	}
+	leaseSeconds := normalizeQwenWorkerLeaseSeconds(req.LeaseSeconds)
+	leaseOwner := strings.TrimSpace(req.LeaseOwner)
+	if leaseOwner == "" {
+		leaseOwner = "qwen-api-worker"
+	}
+
+	kinds := []string{arxiv.QwenEmbeddingJobKindQuery, arxiv.QwenEmbeddingJobKindAbstract}
+	if len(req.Kinds) > 0 {
+		kinds = kinds[:0]
+		seen := make(map[string]bool, len(req.Kinds))
+		for _, rawKind := range req.Kinds {
+			kind := strings.TrimSpace(rawKind)
+			if kind == "" {
+				continue
+			}
+			if kind != arxiv.QwenEmbeddingJobKindQuery && kind != arxiv.QwenEmbeddingJobKindAbstract {
+				respondJSON(w, http.StatusBadRequest, APIResponse{
+					Success: false,
+					Error:   "remote Qwen worker API supports query and abstract jobs",
+				})
+				return
+			}
+			if seen[kind] {
+				continue
+			}
+			seen[kind] = true
+			kinds = append(kinds, kind)
+		}
+		if len(kinds) == 0 {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   "at least one supported Qwen job kind is required",
+			})
+			return
+		}
+	}
+
+	jobs, err := s.cache.ClaimQwenEmbeddingJobs(r.Context(), kinds, limit, leaseOwner, time.Duration(leaseSeconds)*time.Second)
+	if err != nil {
+		respondAPIInternalError(w, http.StatusInternalServerError, "claim Qwen jobs", "failed to claim Qwen jobs", err)
+		return
+	}
+
+	claimed := make([]qwenWorkerClaimedJob, 0, len(jobs))
+	for _, job := range jobs {
+		var text, queryHash string
+		switch job.Kind {
+		case arxiv.QwenEmbeddingJobKindAbstract:
+			paper, err := s.cache.GetPaper(r.Context(), job.PaperID)
+			if err != nil {
+				_ = s.cache.FailQwenEmbeddingJob(r.Context(), job.ID, job.LeaseOwner, job.Attempts, err)
+				continue
+			}
+			text = qwenPaperText(paper)
+			if text == "" {
+				_ = s.cache.FailQwenEmbeddingJob(r.Context(), job.ID, job.LeaseOwner, job.Attempts, fmt.Errorf("paper has no title or abstract to embed"))
+				continue
+			}
+		case arxiv.QwenEmbeddingJobKindQuery:
+			queryHash = strings.TrimPrefix(strings.TrimSpace(job.PaperID), "query:")
+			var err error
+			text, err = s.cache.GetQwenQueryText(r.Context(), queryHash)
+			if err != nil {
+				_ = s.cache.FailQwenEmbeddingJob(r.Context(), job.ID, job.LeaseOwner, job.Attempts, err)
+				continue
+			}
+			if text == "" {
+				_ = s.cache.FailQwenEmbeddingJob(r.Context(), job.ID, job.LeaseOwner, job.Attempts, fmt.Errorf("query text is empty"))
+				continue
+			}
+		default:
+			_ = s.cache.FailQwenEmbeddingJob(r.Context(), job.ID, job.LeaseOwner, job.Attempts, fmt.Errorf("unsupported remote Qwen job kind %q", job.Kind))
+			continue
+		}
+		textSum := sha256.Sum256([]byte(text))
+		sourceHash := fmt.Sprintf("%x", textSum[:])
+		claimed = append(claimed, qwenWorkerClaimedJob{
+			ID:              qwenWorkerLeasedJobID(job.ID, job.Attempts, sourceHash),
+			PaperID:         job.PaperID,
+			QueryHash:       queryHash,
+			Kind:            job.Kind,
+			Scope:           job.Scope,
+			Model:           job.Model,
+			Dim:             job.Dim,
+			Text:            text,
+			TextChars:       len(text),
+			TokenEstimate:   max(1, len(text)/4),
+			Attempts:        job.Attempts,
+			LeaseOwner:      job.LeaseOwner,
+			LeaseGeneration: job.Attempts,
+			SourceHash:      sourceHash,
+		})
+	}
+
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"jobs":  claimed,
+			"count": len(claimed),
+		},
+	})
+}
+
+func (s *server) handleAPIQwenJobAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.localMode && !s.requireQwenWorker(w, r) {
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/qwen/jobs/")
+	if r.Method == http.MethodGet {
+		if path == "" || strings.Contains(path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		job, err := s.cache.GetQwenEmbeddingJob(r.Context(), path)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				respondJSON(w, http.StatusNotFound, APIResponse{Success: false, Error: "job not found"})
+				return
+			}
+			respondAPIInternalError(w, http.StatusInternalServerError, "load Qwen job", "failed to load Qwen job", err)
+			return
+		}
+		respondJSON(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{"job": job}})
+		return
+	}
+	switch {
+	case strings.HasSuffix(path, "/complete"):
+		jobID := strings.TrimSuffix(path, "/complete")
+		s.handleAPIQwenJobComplete(w, r, jobID)
+	case strings.HasSuffix(path, "/fail"):
+		jobID := strings.TrimSuffix(path, "/fail")
+		s.handleAPIQwenJobFail(w, r, jobID)
+	case strings.HasSuffix(path, "/heartbeat"):
+		jobID := strings.TrimSuffix(path, "/heartbeat")
+		s.handleAPIQwenJobHeartbeat(w, r, jobID)
+	default:
+		respondJSON(w, http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   "unknown Qwen job action",
+		})
+	}
+}
+
+func (s *server) handleAPIQwenJobHeartbeat(w http.ResponseWriter, r *http.Request, jobID string) {
+	jobID, pathGeneration, _ := parseQwenWorkerLeasedJobID(jobID)
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "job ID required"})
+		return
+	}
+
+	var req qwenWorkerHeartbeatRequest
+	if err := decodeQwenWorkerBody(w, r, &req, false); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "invalid JSON body"})
+		return
+	}
+	leaseOwner := strings.TrimSpace(req.LeaseOwner)
+	if leaseOwner == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "lease owner required"})
+		return
+	}
+	generation := pathGeneration
+	if req.LeaseGeneration > 0 {
+		if generation > 0 && generation != req.LeaseGeneration {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+			return
+		}
+		generation = req.LeaseGeneration
+	}
+	if generation <= 0 {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease generation required"})
+		return
+	}
+	leaseSeconds := normalizeQwenWorkerLeaseSeconds(req.LeaseSeconds)
+	job, err := s.cache.RenewQwenEmbeddingJobLease(r.Context(), jobID, leaseOwner, generation, time.Duration(leaseSeconds)*time.Second)
+	if err != nil {
+		s.respondQwenWorkerActionError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"jobId":           job.ID,
+			"status":          arxiv.QwenEmbeddingJobRunning,
+			"leaseOwner":      job.LeaseOwner,
+			"leaseGeneration": job.Attempts,
+			"leaseUntil":      job.LeaseUntil,
+			"leaseSeconds":    leaseSeconds,
+		},
+	})
+}
+
+func (s *server) handleAPIQwenJobComplete(w http.ResponseWriter, r *http.Request, jobID string) {
+	jobID, pathGeneration, pathSourceHash := parseQwenWorkerLeasedJobID(jobID)
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "job ID required",
+		})
+		return
+	}
+
+	var req qwenWorkerCompleteRequest
+	if err := decodeQwenWorkerBody(w, r, &req, false); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "invalid JSON body",
+		})
+		return
+	}
+	if len(req.Embedding) != arxiv.QwenEmbeddingDim {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   fmt.Sprintf("embedding has %d dimensions, want %d", len(req.Embedding), arxiv.QwenEmbeddingDim),
+		})
+		return
+	}
+	generation := pathGeneration
+	if req.LeaseGeneration > 0 {
+		if generation > 0 && generation != req.LeaseGeneration {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+			return
+		}
+		generation = req.LeaseGeneration
+	}
+	if generation <= 0 {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease generation required"})
+		return
+	}
+	sourceHash := pathSourceHash
+	if strings.TrimSpace(req.SourceHash) != "" {
+		if sourceHash != "" && sourceHash != req.SourceHash {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job input no longer current"})
+			return
+		}
+		sourceHash = req.SourceHash
+	}
+
+	job, err := s.cache.GetQwenEmbeddingJob(r.Context(), jobID)
+	if err != nil {
+		respondJSON(w, http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   "job not found",
+		})
+		return
+	}
+	leaseOwner := job.LeaseOwner
+	if strings.TrimSpace(req.LeaseOwner) != "" {
+		if req.LeaseOwner != leaseOwner {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+			return
+		}
+		leaseOwner = req.LeaseOwner
+	}
+
+	switch job.Kind {
+	case arxiv.QwenEmbeddingJobKindQuery:
+		queryHash := strings.TrimPrefix(strings.TrimSpace(job.PaperID), "query:")
+		queryText, err := s.cache.GetQwenQueryText(r.Context(), queryHash)
+		if err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   "query embedding row not found",
+			})
+			return
+		}
+		if err := s.cache.CompleteQwenQueryEmbeddingJob(r.Context(), job.ID, leaseOwner, generation, queryHash, req.Embedding); err != nil {
+			s.respondQwenWorkerActionError(w, err)
+			return
+		}
+		status, _ := s.cache.QwenQueryEmbeddingStatus(r.Context(), queryText)
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data: map[string]interface{}{
+				"jobId":     job.ID,
+				"queryHash": queryHash,
+				"status":    status,
+			},
+		})
+		return
+
+	case arxiv.QwenEmbeddingJobKindAbstract:
+		// Continue below.
+
+	default:
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "remote complete supports query and abstract jobs",
+		})
+		return
+	}
+
+	paper, err := s.cache.GetPaper(r.Context(), job.PaperID)
+	if err != nil {
+		respondJSON(w, http.StatusNotFound, APIResponse{
+			Success: false,
+			Error:   "paper not found",
+		})
+		return
+	}
+	text := qwenPaperText(paper)
+	if text == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "paper has no title or abstract to embed",
+		})
+		return
+	}
+	sum := sha256.Sum256([]byte(text))
+	currentSourceHash := fmt.Sprintf("%x", sum[:])
+	if sourceHash == "" {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job input hash required"})
+		return
+	}
+	if sourceHash != currentSourceHash {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job input no longer current"})
+		return
+	}
+	if err := s.cache.CompleteQwenAbstractEmbeddingJob(r.Context(), job.ID, leaseOwner, generation, job.PaperID, sourceHash, len(text), max(1, len(text)/4), req.Embedding); err != nil {
+		s.respondQwenWorkerActionError(w, err)
+		return
+	}
+	status, _ := s.cache.QwenPaperEmbeddingStatus(r.Context(), job.PaperID)
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"jobId":   job.ID,
+			"paperId": job.PaperID,
+			"status":  status,
+		},
+	})
+}
+
+func (s *server) handleAPIQwenJobFail(w http.ResponseWriter, r *http.Request, jobID string) {
+	jobID, pathGeneration, _ := parseQwenWorkerLeasedJobID(jobID)
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Error:   "job ID required",
+		})
+		return
+	}
+	var req qwenWorkerFailRequest
+	if err := decodeQwenWorkerBody(w, r, &req, false); err != nil {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "invalid JSON body"})
+		return
+	}
+	generation := pathGeneration
+	if req.LeaseGeneration > 0 {
+		if generation > 0 && generation != req.LeaseGeneration {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+			return
+		}
+		generation = req.LeaseGeneration
+	}
+	if generation <= 0 {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease generation required"})
+		return
+	}
+	job, err := s.cache.GetQwenEmbeddingJob(r.Context(), jobID)
+	if err != nil {
+		respondJSON(w, http.StatusNotFound, APIResponse{Success: false, Error: "job not found"})
+		return
+	}
+	leaseOwner := job.LeaseOwner
+	if strings.TrimSpace(req.LeaseOwner) != "" {
+		if req.LeaseOwner != leaseOwner {
+			respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+			return
+		}
+		leaseOwner = req.LeaseOwner
+	}
+	message := strings.TrimSpace(req.Error)
+	if message == "" {
+		message = "worker reported failure"
+	}
+	if err := s.cache.FailQwenEmbeddingJob(r.Context(), jobID, leaseOwner, generation, errors.New(message)); err != nil {
+		s.respondQwenWorkerActionError(w, err)
+		return
+	}
+	job, _ = s.cache.GetQwenEmbeddingJob(r.Context(), jobID)
+	status := arxiv.QwenEmbeddingJobFailed
+	if job != nil {
+		status = job.Status
+	}
+	respondJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"jobId":  jobID,
+			"status": status,
+		},
+	})
+}
+
+func decodeQwenWorkerBody(w http.ResponseWriter, r *http.Request, destination any, allowEmpty bool) error {
+	const maxBodyBytes int64 = 128 << 10
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(destination); err != nil {
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *server) respondQwenWorkerActionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, arxiv.ErrQwenEmbeddingJobLeaseLost) {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "job lease no longer active"})
+		return
+	}
+	respondAPIInternalError(w, http.StatusInternalServerError, "update Qwen job", "failed to update Qwen job", err)
+}
+
 func (s *server) generatePaperEmbedding(ctx context.Context, paper *arxiv.Paper) (string, error) {
-	if strings.TrimSpace(s.qwenEmbeddingServiceURL) != "" {
-		if err := s.generatePaperQwenEmbedding(ctx, paper); err != nil {
-			return "", err
+	if strings.TrimSpace(s.qwenEmbeddingServiceURL) == "" {
+		if s.qwenAsyncWorkerEnabled {
+			return "", errQwenQueryEmbeddingQueued
 		}
-		return "qwen-service", nil
+		return "", errQwenQueryEmbeddingUnavailable
 	}
-
-	if s.embeddingServiceURL != "" {
-		if err := s.generatePaperEmbeddingHTTP(ctx, paper); err == nil {
-			return "embedding-service", nil
-		} else {
-			fmt.Printf("Embedding service paper generation error (falling back to Python): %v\n", err)
-		}
-	}
-
-	if err := s.generatePaperEmbeddingPython(ctx, paper.ID); err != nil {
+	if err := s.generatePaperQwenEmbedding(ctx, paper); err != nil {
 		return "", err
 	}
-	return "python-script", nil
+	return "qwen-service", nil
 }
 
 func (s *server) generatePaperQwenEmbedding(ctx context.Context, paper *arxiv.Paper) error {
@@ -1111,70 +2011,7 @@ func qwenPaperText(paper *arxiv.Paper) string {
 	return title + abstract
 }
 
-func (s *server) generatePaperEmbeddingHTTP(ctx context.Context, paper *arxiv.Paper) error {
-	reqBody := map[string]string{
-		"paper_id": paper.ID,
-		"title":    paper.Title,
-		"abstract": paper.Abstract,
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.embeddingServiceURL+"/embed/paper", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("embedding service request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("embedding service error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode embedding service response: %w", err)
-	}
-	if !result.Success {
-		return fmt.Errorf("embedding service failed: %s", result.Message)
-	}
-
-	return nil
-}
-
-func (s *server) generatePaperEmbeddingPython(ctx context.Context, paperID string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "python3", getToolsPath("generate_embeddings.py"), s.cache.Root(), "--paper-id", paperID)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v, output: %s", err, string(output))
-	}
-
-	outputStr := strings.TrimSpace(string(output))
-	if strings.HasPrefix(outputStr, "ERROR:") {
-		return fmt.Errorf("%s", outputStr)
-	}
-
-	return nil
-}
-
-// handleAPIGenerateEmbeddings generates embeddings for all papers
+// handleAPIGenerateEmbeddings is retained only to give legacy clients an explicit migration response.
 func (s *server) handleAPIGenerateEmbeddings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1184,170 +2021,10 @@ func (s *server) handleAPIGenerateEmbeddings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	limit, err := parseLimit(r, 0, 10000)
-	if err != nil {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	// Check if this is an SSE request
-	if r.Header.Get("Accept") == "text/event-stream" {
-		s.handleGenerateEmbeddingsSSE(w, r, limit)
-		return
-	}
-
-	// Original synchronous behavior for non-SSE requests
-	args := []string{getToolsPath("generate_embeddings.py"), s.cache.Root()}
-	if limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(limit))
-	}
-
-	cmd := exec.Command("python3", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   fmt.Sprintf("failed to generate embeddings: %v, output: %s", err, string(output)),
-		})
-		return
-	}
-
-	outputStr := strings.TrimSpace(string(output))
-	if strings.HasPrefix(outputStr, "ERROR:") {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   outputStr,
-		})
-		return
-	}
-
-	ctx := r.Context()
-	count, _ := s.cache.CountEmbeddings(ctx)
-
-	respondJSON(w, http.StatusOK, APIResponse{
-		Success: true,
-		Data: map[string]interface{}{
-			"count":   count,
-			"message": "embeddings generated successfully",
-		},
+	respondJSON(w, http.StatusGone, APIResponse{
+		Success: false,
+		Error:   "legacy MiniLM bulk generation has been retired; POST /api/v1/papers/{id}/embeddings to generate or queue the canonical Qwen profile",
 	})
-}
-
-// handleGenerateEmbeddingsSSE provides real-time progress for embedding generation
-func (s *server) handleGenerateEmbeddingsSSE(w http.ResponseWriter, r *http.Request, limit int) {
-	// Set SSE headers
-	setSSEHeaders(w)
-	w.Header().Set("Access-Control-Allow-Headers", "Cache-Control")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	ctx := r.Context()
-
-	// Send initial message
-	fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-		"type":    "start",
-		"message": "Starting embedding generation...",
-	}))
-	flusher.Flush()
-
-	// Prepare command with progress output
-	args := []string{getToolsPath("generate_embeddings.py"), s.cache.Root()}
-	if limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(limit))
-	}
-
-	cmd := exec.CommandContext(ctx, "python3", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "error",
-			"error": err.Error(),
-		}))
-		flusher.Flush()
-		return
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "error",
-			"error": err.Error(),
-		}))
-		flusher.Flush()
-		return
-	}
-
-	// Read output line by line
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Parse progress from Python script output
-		// Expected format: "Processed X/Y papers (Z% complete)"
-		if strings.Contains(line, "Processed") && strings.Contains(line, "papers") {
-			// Try to extract progress numbers
-			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				var current, total int
-				if strings.Contains(parts[1], "/") {
-					splitParts := strings.Split(parts[1], "/")
-					if len(splitParts) == 2 {
-						fmt.Sscanf(splitParts[0], "%d", &current)
-						fmt.Sscanf(splitParts[1], "%d", &total)
-					}
-				}
-
-				fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-					"type":    "progress",
-					"current": current,
-					"total":   total,
-					"message": strings.TrimSpace(line),
-				}))
-				flusher.Flush()
-			}
-		} else {
-			// Send any other output as status message
-			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-				"type":    "status",
-				"message": strings.TrimSpace(line),
-			}))
-			flusher.Flush()
-		}
-	}
-
-	// Wait for command to finish
-	err = cmd.Wait()
-
-	// Get final embedding count
-	count, _ := s.cache.CountEmbeddings(ctx)
-
-	if err != nil {
-		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":  "error",
-			"error": err.Error(),
-			"count": count,
-		}))
-	} else {
-		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-			"type":    "complete",
-			"count":   count,
-			"message": "Embedding generation completed successfully",
-		}))
-	}
-	flusher.Flush()
-
-	// Send final close event
-	fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
-		"type": "close",
-	}))
-	flusher.Flush()
 }
 
 // toJSON helper function to convert interface to JSON string
@@ -1356,53 +2033,70 @@ func toJSON(data interface{}) string {
 	return string(jsonBytes)
 }
 
-// handleAPIEmbeddingWorkerStatus returns the embedding worker status
+// handleAPIEmbeddingWorkerStatus reports the canonical Qwen pipeline only.
 func (s *server) handleAPIEmbeddingWorkerStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	if s.cache == nil {
+		respondJSON(w, http.StatusServiceUnavailable, APIResponse{Success: false, Error: "Qwen pipeline status unavailable"})
+		return
+	}
 	ctx := r.Context()
-
-	// Get basic embedding stats
-	embeddingCount, _ := s.cache.CountEmbeddings(ctx)
-	stats, _ := s.cache.Stats(ctx)
-	pendingCount := stats.TotalPapers - embeddingCount
-	if pendingCount < 0 {
-		pendingCount = 0
+	stats, err := s.cache.QwenPipelineStats(ctx)
+	if err != nil {
+		respondAPIInternalError(w, http.StatusServiceUnavailable, "load Qwen pipeline status", "Qwen pipeline status unavailable", err)
+		return
 	}
-
-	response := map[string]interface{}{
-		"embeddingCount": embeddingCount,
-		"totalPapers":    stats.TotalPapers,
-		"pendingCount":   pendingCount,
-		"serviceURL":     s.embeddingServiceURL,
-	}
-
-	// Add worker stats if worker is running
-	if s.embeddingWorker != nil {
-		workerStats := s.embeddingWorker.Stats()
-		response["worker"] = workerStats
-	} else {
-		response["worker"] = nil
-		response["workerEnabled"] = false
-	}
-
-	// Check embedding service health
-	if s.embeddingServiceURL != "" {
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	serviceConfigured := strings.TrimSpace(s.qwenEmbeddingServiceURL) != ""
+	serviceUp := false
+	if serviceConfigured {
+		healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		req, _ := http.NewRequestWithContext(ctx, "GET", s.embeddingServiceURL+"/health", nil)
-		resp, err := http.DefaultClient.Do(req)
-		if resp != nil {
-			defer resp.Body.Close()
+		req, reqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, strings.TrimRight(s.qwenEmbeddingServiceURL, "/")+"/health", nil)
+		if reqErr == nil {
+			resp, requestErr := http.DefaultClient.Do(req)
+			if resp != nil {
+				defer resp.Body.Close()
+			}
+			if requestErr == nil && resp != nil && resp.StatusCode == http.StatusOK {
+				var health struct {
+					Ready     bool   `json:"ready"`
+					Model     string `json:"model"`
+					Dimension int    `json:"dimension"`
+				}
+				serviceUp = json.NewDecoder(resp.Body).Decode(&health) == nil &&
+					health.Ready && health.Model == arxiv.QwenEmbeddingModel && health.Dimension == arxiv.QwenEmbeddingDim
+			}
 		}
-		if err != nil || resp.StatusCode != http.StatusOK {
-			response["serviceUp"] = false
-		} else {
-			response["serviceUp"] = true
-		}
+	}
+	available := serviceUp || s.qwenAsyncWorkerEnabled
+	state := "unavailable"
+	if serviceConfigured && serviceUp {
+		state = "synchronous-service-ready"
+	} else if s.qwenAsyncWorkerEnabled {
+		state = "asynchronous-worker-configured"
+	} else if serviceConfigured {
+		state = "synchronous-service-down"
+	}
+	response := map[string]interface{}{
+		"pipeline":  arxiv.QwenEmbeddingModel,
+		"model":     arxiv.QwenEmbeddingModel,
+		"dimension": arxiv.QwenEmbeddingDim,
+		"state":     state,
+		"available": available,
+		"execution": map[string]interface{}{
+			"synchronousConfigured":  serviceConfigured,
+			"synchronousUp":          serviceUp,
+			"asynchronousConfigured": s.qwenAsyncWorkerEnabled,
+		},
+		"coverage": map[string]interface{}{
+			"abstractProfiles":         stats.AbstractProfiles,
+			"fullPaperChunks":          stats.FullPaperChunks,
+			"fullPaperChunkEmbeddings": stats.FullPaperChunkEmbeddings,
+		},
 	}
 
 	respondJSON(w, http.StatusOK, APIResponse{
@@ -1411,26 +2105,48 @@ func (s *server) handleAPIEmbeddingWorkerStatus(w http.ResponseWriter, r *http.R
 	})
 }
 
-var queryEmbeddingPythonSemaphore = make(chan struct{}, 1)
-
-func (s *server) generateQueryEmbedding(ctx context.Context, query string) ([]float32, error) {
-	// Try HTTP embedding service first (fast path)
-	if s.embeddingServiceURL != "" {
-		embedding, err := s.generateQueryEmbeddingHTTP(ctx, query)
-		if err == nil {
-			return embedding, nil
-		}
-		// Log error but fall through to Python fallback
-		fmt.Printf("Embedding service error (falling back to Python): %v\n", err)
-	}
-
-	// Fallback to Python script (slow path - loads model each time)
-	return s.generateQueryEmbeddingPython(ctx, query)
+func (s *server) qwenExecutionConfigured() bool {
+	return strings.TrimSpace(s.qwenEmbeddingServiceURL) != "" || s.qwenAsyncWorkerEnabled
 }
 
+var (
+	errQwenQueryEmbeddingQueued      = errors.New("Qwen query embedding queued")
+	errQwenQueryEmbeddingUnavailable = errors.New("Qwen query embedding execution unavailable")
+)
+
+const qwenQueryRetryAfterSeconds = 75
+
 func (s *server) generateQwenQueryEmbedding(ctx context.Context, query string) ([]float32, error) {
+	if embedding, ok, err := s.cache.GetQwenQueryEmbedding(ctx, query); err != nil {
+		return nil, err
+	} else if ok {
+		return embedding, nil
+	}
+
+	queueQuery := func(cause error) ([]float32, error) {
+		status, err := s.cache.EnsureQwenQueryJob(ctx, query, 1000)
+		if err != nil {
+			if cause != nil {
+				return nil, fmt.Errorf("%w after Qwen service error %q; failed to queue query embedding: %v", errQwenQueryEmbeddingQueued, cause.Error(), err)
+			}
+			return nil, err
+		}
+		for _, job := range status.Jobs {
+			if job.Status == arxiv.QwenEmbeddingJobFailed && job.Attempts >= arxiv.MaxQwenEmbeddingJobAttempts {
+				return nil, fmt.Errorf("%w after %d failed attempts", errQwenQueryEmbeddingUnavailable, job.Attempts)
+			}
+		}
+		if cause != nil {
+			return nil, fmt.Errorf("%w: %v", errQwenQueryEmbeddingQueued, cause)
+		}
+		return nil, errQwenQueryEmbeddingQueued
+	}
+
 	if strings.TrimSpace(s.qwenEmbeddingServiceURL) == "" {
-		return nil, fmt.Errorf("Qwen search is warming up; try Quick Search for now")
+		if s.qwenAsyncWorkerEnabled {
+			return queueQuery(nil)
+		}
+		return nil, errQwenQueryEmbeddingUnavailable
 	}
 
 	reqBody := map[string][]string{"texts": []string{query}}
@@ -1439,10 +2155,10 @@ func (s *server) generateQwenQueryEmbedding(ctx context.Context, query string) (
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(s.qwenEmbeddingServiceURL, "/")+"/embed/batch", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(requestCtx, "POST", strings.TrimRight(s.qwenEmbeddingServiceURL, "/")+"/embed/batch", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -1450,13 +2166,21 @@ func (s *server) generateQwenQueryEmbedding(ctx context.Context, query string) (
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Qwen service request failed: %w", err)
+		cause := fmt.Errorf("Qwen service request failed: %w", err)
+		if s.qwenAsyncWorkerEnabled {
+			return queueQuery(cause)
+		}
+		return nil, fmt.Errorf("%w: %v", errQwenQueryEmbeddingUnavailable, cause)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Qwen service error (status %d): %s", resp.StatusCode, string(respBody))
+		cause := fmt.Errorf("Qwen service error (status %d): %s", resp.StatusCode, string(respBody))
+		if s.qwenAsyncWorkerEnabled {
+			return queueQuery(cause)
+		}
+		return nil, fmt.Errorf("%w: %v", errQwenQueryEmbeddingUnavailable, cause)
 	}
 
 	var result struct {
@@ -1472,91 +2196,10 @@ func (s *server) generateQwenQueryEmbedding(ctx context.Context, query string) (
 	if len(result.Embeddings[0]) != arxiv.QwenEmbeddingDim {
 		return nil, fmt.Errorf("Qwen service returned %d dimensions, want %d", len(result.Embeddings[0]), arxiv.QwenEmbeddingDim)
 	}
+	if err := s.cache.StoreQwenQueryEmbeddingForQuery(ctx, query, result.Embeddings[0]); err != nil {
+		fmt.Printf("could not cache Qwen query embedding: %v\n", err)
+	}
 	return result.Embeddings[0], nil
-}
-
-// generateQueryEmbeddingHTTP calls the FastAPI embedding service.
-func (s *server) generateQueryEmbeddingHTTP(ctx context.Context, query string) ([]float32, error) {
-	reqBody := map[string]string{"text": query}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", s.embeddingServiceURL+"/embed", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("embedding service request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("embedding service error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode embedding response: %w", err)
-	}
-
-	return result.Embedding, nil
-}
-
-// generateQueryEmbeddingPython falls back to the Python script.
-func (s *server) generateQueryEmbeddingPython(ctx context.Context, query string) ([]float32, error) {
-	select {
-	case queryEmbeddingPythonSemaphore <- struct{}{}:
-		defer func() { <-queryEmbeddingPythonSemaphore }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "python3", getToolsPath("generate_embeddings.py"), s.cache.Root(), "--query", query)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("python embedding timed out: %w", ctx.Err())
-		}
-		return nil, fmt.Errorf("python embedding failed: %v, output: %s", err, string(output))
-	}
-
-	outputStr := strings.TrimSpace(string(output))
-	if outputStr == "" {
-		return nil, fmt.Errorf("empty output from python embedding")
-	}
-
-	if strings.HasPrefix(outputStr, "ERROR:") {
-		return nil, fmt.Errorf("embedding script error: %s", outputStr)
-	}
-
-	// Parse comma-separated float values
-	parts := strings.Split(outputStr, ",")
-	embedding := make([]float32, len(parts))
-
-	for i, part := range parts {
-		val, err := strconv.ParseFloat(strings.TrimSpace(part), 32)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse embedding value %q: %v", part, err)
-		}
-		embedding[i] = float32(val)
-	}
-
-	return embedding, nil
 }
 
 // Semaphore to limit concurrent SSE initializations (prevents DB overload)
@@ -1591,7 +2234,7 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		http.Error(w, "real-time streaming is unavailable", http.StatusInternalServerError)
 		return
 	}
 
@@ -1615,9 +2258,10 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 	papers, err := s.cache.ListRecentPapersLite(ctx, limit)
 	if err != nil {
 		<-sseInitSemaphore // Release semaphore
+		logAPIInternalError("list recent papers for stream", err)
 		fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 			"type":  "error",
-			"error": err.Error(),
+			"error": "Recent papers are temporarily unavailable.",
 		}))
 		flusher.Flush()
 		return
@@ -1643,10 +2287,12 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 				"type":  "paper",
 				"index": i,
 				"paper": map[string]interface{}{
-					"ID":         paper.ID,
-					"Title":      paper.Title,
-					"Authors":    paper.Authors,
-					"Categories": paper.Categories,
+					"ID":           paper.ID,
+					"Title":        paper.Title,
+					"Authors":      paper.Authors,
+					"Categories":   paper.Categories,
+					"HasEmbedding": embeddingIDs[paper.ID],
+					"hasEmbedding": embeddingIDs[paper.ID],
 				},
 				"hasEmbedding": embeddingIDs[paper.ID],
 			}))
@@ -1662,7 +2308,8 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 	flusher.Flush()
 
 	// Keep connection open for 10 minutes max (client will reconnect)
-	timeout := time.After(10 * time.Minute)
+	timeout := time.NewTimer(10 * time.Minute)
+	defer timeout.Stop()
 
 	// Send keepalive every 30s to prevent connection timeouts
 	keepalive := time.NewTicker(30 * time.Second)
@@ -1673,7 +2320,7 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 		case <-ctx.Done():
 			// Client disconnected
 			return
-		case <-timeout:
+		case <-timeout.C:
 			// Connection timeout - client will reconnect
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 				"type": "timeout",
@@ -1686,9 +2333,17 @@ func (s *server) handleAPIRecentPapersStream(w http.ResponseWriter, r *http.Requ
 			flusher.Flush()
 		case event := <-sub:
 			// New paper fetched - stream it to client
+			paper := map[string]interface{}{
+				"ID":           event.Paper.ID,
+				"Title":        event.Paper.Title,
+				"Authors":      event.Paper.Authors,
+				"Categories":   event.Paper.Categories,
+				"HasEmbedding": event.HasEmbedding,
+				"hasEmbedding": event.HasEmbedding,
+			}
 			fmt.Fprintf(w, "data: %s\n\n", toJSON(map[string]interface{}{
 				"type":         "new",
-				"paper":        event.Paper,
+				"paper":        paper,
 				"hasEmbedding": event.HasEmbedding,
 			}))
 			flusher.Flush()
@@ -1701,6 +2356,17 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+func respondAPIInternalError(w http.ResponseWriter, status int, operation, publicMessage string, err error) {
+	logAPIInternalError(operation, err)
+	respondJSON(w, status, APIResponse{Success: false, Error: publicMessage})
+}
+
+func logAPIInternalError(operation string, err error) {
+	if err != nil {
+		log.Printf("api %s: %v", operation, err)
+	}
 }
 
 func parseLimit(r *http.Request, defaultLimit, maxLimit int) (int, error) {
@@ -1729,12 +2395,8 @@ func (s *server) handleAPIAuthorCollaborators(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	author := r.URL.Query().Get("author")
-	if author == "" {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   "author parameter required",
-		})
+	author, ok := parseAuthorParameter(w, r)
+	if !ok {
 		return
 	}
 
@@ -1750,10 +2412,7 @@ func (s *server) handleAPIAuthorCollaborators(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 	collabs, err := s.cache.GetCollaborators(ctx, author, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load author collaborators", "author collaborators unavailable", err)
 		return
 	}
 
@@ -1774,12 +2433,8 @@ func (s *server) handleAPIAuthorSimilar(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	author := r.URL.Query().Get("author")
-	if author == "" {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   "author parameter required",
-		})
+	author, ok := parseAuthorParameter(w, r)
+	if !ok {
 		return
 	}
 
@@ -1795,10 +2450,7 @@ func (s *server) handleAPIAuthorSimilar(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	similar, err := s.cache.GetSimilarAuthors(ctx, author, limit)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load similar authors", "similar authors unavailable", err)
 		return
 	}
 
@@ -1819,22 +2471,15 @@ func (s *server) handleAPIAuthorStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	author := r.URL.Query().Get("author")
-	if author == "" {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   "author parameter required",
-		})
+	author, ok := parseAuthorParameter(w, r)
+	if !ok {
 		return
 	}
 
 	ctx := r.Context()
 	stats, err := s.cache.GetAuthorStats(ctx, author)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load author statistics", "author statistics unavailable", err)
 		return
 	}
 
@@ -1857,16 +2502,15 @@ func (s *server) handleAPIBuildAuthorGraph(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ctx := r.Context()
-
-	// Run in background
+	if !s.authorGraphBuildMu.TryLock() {
+		respondJSON(w, http.StatusConflict, APIResponse{Success: false, Error: "author graph build already running"})
+		return
+	}
 	go func() {
+		defer s.authorGraphBuildMu.Unlock()
 		bgCtx := context.Background()
 		if err := s.cache.BuildAuthorGraph(bgCtx); err != nil {
-			fmt.Printf("Error building author graph: %v\n", err)
-		}
-		if err := s.cache.BuildAuthorEmbeddings(bgCtx); err != nil {
-			fmt.Printf("Error building author embeddings: %v\n", err)
+			log.Printf("build author graph: %v", err)
 		}
 	}()
 
@@ -1876,7 +2520,6 @@ func (s *server) handleAPIBuildAuthorGraph(w http.ResponseWriter, r *http.Reques
 			"message": "Author graph build started in background",
 		},
 	})
-	_ = ctx // context used for request
 }
 
 // handleAPIAuthorGraph returns collaboration graph data for visualization
@@ -1886,12 +2529,8 @@ func (s *server) handleAPIAuthorGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	author := r.URL.Query().Get("author")
-	if author == "" {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   "author parameter required",
-		})
+	author, ok := parseAuthorParameter(w, r)
+	if !ok {
 		return
 	}
 
@@ -1903,10 +2542,7 @@ func (s *server) handleAPIAuthorGraph(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	graph, err := s.cache.GetAuthorGraph(ctx, author, depth)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load author graph", "author graph unavailable", err)
 		return
 	}
 
@@ -1923,22 +2559,15 @@ func (s *server) handleAPIAuthorProfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	author := r.URL.Query().Get("author")
-	if author == "" {
-		respondJSON(w, http.StatusBadRequest, APIResponse{
-			Success: false,
-			Error:   "author parameter required",
-		})
+	author, ok := parseAuthorParameter(w, r)
+	if !ok {
 		return
 	}
 
 	ctx := r.Context()
 	profile, err := s.cache.GetAuthorProfile(ctx, author)
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
+		respondAPIInternalError(w, http.StatusInternalServerError, "load author profile", "author profile unavailable", err)
 		return
 	}
 
@@ -1946,4 +2575,17 @@ func (s *server) handleAPIAuthorProfile(w http.ResponseWriter, r *http.Request) 
 		Success: true,
 		Data:    profile,
 	})
+}
+
+func parseAuthorParameter(w http.ResponseWriter, r *http.Request) (string, bool) {
+	author := strings.TrimSpace(r.URL.Query().Get("author"))
+	if author == "" {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "author parameter required"})
+		return "", false
+	}
+	if len(author) > 256 {
+		respondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: "author parameter exceeds 256 bytes"})
+		return "", false
+	}
+	return author, true
 }

@@ -39,11 +39,13 @@ def ensure_schema(conn):
                 token_estimate integer DEFAULT 0,
                 created timestamptz DEFAULT now(),
                 updated timestamptz DEFAULT now(),
-                vector vector(1024),
+                vector vector(1024) NOT NULL,
                 PRIMARY KEY (paper_id, scope, model, dim)
             )
             """
         )
+        cur.execute("DELETE FROM embeddings_v2 WHERE vector IS NULL")
+        cur.execute("ALTER TABLE embeddings_v2 ALTER COLUMN vector SET NOT NULL")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_v2_lookup ON embeddings_v2(scope, model, dim, paper_id)")
     conn.commit()
 
@@ -55,11 +57,10 @@ def fetch_papers(conn, model, scope, dim, limit, order, refresh_stale=False, aft
     order_sql = "src.fetched_at DESC NULLS LAST, src.created DESC NULLS LAST"
     if order == "random":
         order_sql = "random()"
-    stale_clause = "e.paper_id IS NULL OR e.vector IS NULL"
+    stale_clause = "e.paper_id IS NULL"
     if refresh_stale:
         stale_clause = """
             e.paper_id IS NULL
-            OR e.vector IS NULL
             OR e.source_hash IS DISTINCT FROM encode(digest(
                 CASE
                     WHEN src.title_text <> '' AND src.abstract_text <> '' THEN src.title_text || '. ' || src.abstract_text
@@ -88,6 +89,7 @@ def fetch_papers(conn, model, scope, dim, limit, order, refresh_stale=False, aft
          AND e.scope = %s
          AND e.model = %s
          AND e.dim = %s
+         AND e.vector IS NOT NULL
         WHERE ({stale_clause})
         ORDER BY {order_sql}
         LIMIT %s
@@ -112,6 +114,7 @@ def fetch_papers_by_id(conn, model, scope, dim, limit, refresh_stale=False, afte
                     AND e.scope = %s
                     AND e.model = %s
                     AND e.dim = %s
+                    AND e.vector IS NOT NULL
               )
             ORDER BY p.id
             LIMIT %s
@@ -128,12 +131,12 @@ def fetch_papers_by_id(conn, model, scope, dim, limit, refresh_stale=False, afte
          AND e.scope = %s
          AND e.model = %s
          AND e.dim = %s
+         AND e.vector IS NOT NULL
         WHERE p.id > %s
           AND COALESCE(p.title, '') <> ''
           AND COALESCE(p.abstract, '') <> ''
           AND (
               e.paper_id IS NULL
-              OR e.vector IS NULL
               OR e.source_hash IS DISTINCT FROM encode(digest(
                   CASE
                       WHEN trim(COALESCE(p.title, '')) <> ''
@@ -161,9 +164,15 @@ def paper_text(title, abstract):
 
 
 def store_batch(conn, rows, embeddings, model, scope, dim):
+    if len(rows) != len(embeddings):
+        raise ValueError(f"received {len(embeddings)} embeddings for {len(rows)} rows")
     payload = []
     for (paper_id, title, abstract), embedding in zip(rows, embeddings):
         text = paper_text(title, abstract)
+        if embedding is None or len(embedding) != dim:
+            actual_dim = 0 if embedding is None else len(embedding)
+            raise ValueError(f"paper {paper_id} embedding has dim={actual_dim}; want {dim}")
+        vector = vector_literal(embedding)
         payload.append(
             (
                 paper_id,
@@ -173,9 +182,12 @@ def store_batch(conn, rows, embeddings, model, scope, dim):
                 source_hash(text),
                 len(text),
                 max(1, len(text) // 4),
-                vector_literal(embedding),
+                vector,
             )
         )
+    if not payload:
+        print("No embeddings in batch; skipping store.", flush=True)
+        return
 
     with conn.cursor() as cur:
         cur.executemany(

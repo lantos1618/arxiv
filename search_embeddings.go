@@ -78,7 +78,7 @@ func (c *Cache) SearchSemantic(ctx context.Context, queryEmbedding []float32, li
 		limit = 20
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, fmt.Errorf("semantic search requires PostgreSQL with pgvector")
+		return nil, c.capabilityError("semantic search")
 	}
 
 	// Convert query embedding to pgvector format: [0.1,0.2,...]
@@ -118,7 +118,7 @@ func (c *Cache) SearchSemantic(ctx context.Context, queryEmbedding []float32, li
 		return nil, err
 	}
 
-	return c.attachPaperDetails(ctx, results), nil
+	return c.attachPaperDetails(ctx, results)
 }
 
 // SearchSemanticQwen performs abstract-level semantic search over Qwen vectors.
@@ -127,7 +127,7 @@ func (c *Cache) SearchSemanticQwen(ctx context.Context, queryEmbedding []float32
 		limit = 20
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, fmt.Errorf("qwen semantic search requires PostgreSQL with pgvector")
+		return nil, c.capabilityError("qwen semantic search")
 	}
 
 	vecStr := float32SliceToVectorString(queryEmbedding)
@@ -165,7 +165,7 @@ func (c *Cache) SearchSemanticQwen(ctx context.Context, queryEmbedding []float32
 		return nil, err
 	}
 
-	return c.attachPaperDetails(ctx, results), nil
+	return c.attachPaperDetails(ctx, results)
 }
 
 // SearchDeepQwen searches full-paper chunks and returns one best chunk per paper.
@@ -174,7 +174,7 @@ func (c *Cache) SearchDeepQwen(ctx context.Context, queryEmbedding []float32, li
 		limit = 20
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, fmt.Errorf("deep search requires PostgreSQL with pgvector")
+		return nil, c.capabilityError("deep search")
 	}
 
 	vecStr := float32SliceToVectorString(queryEmbedding)
@@ -196,6 +196,7 @@ func (c *Cache) SearchDeepQwen(ctx context.Context, queryEmbedding []float32, li
 			  AND e.model = $2
 			  AND e.dim = $3
 			  AND e.vector IS NOT NULL
+			  AND e.source_hash = c.text_hash
 			  AND COALESCE(c.text, '') <> ''
 			ORDER BY e.vector <=> $1::vector
 			LIMIT $4
@@ -237,15 +238,17 @@ func (c *Cache) SearchDeepQwen(ctx context.Context, queryEmbedding []float32, li
 		return nil, err
 	}
 
-	if papers, err := c.GetPapersByIDs(ctx, ids); err == nil {
-		paperMap := make(map[string]*Paper, len(papers))
-		for _, paper := range papers {
-			p := paper
-			paperMap[paper.ID] = &p
-		}
-		for i := range results {
-			results[i].Paper = paperMap[results[i].PaperID]
-		}
+	papers, err := c.GetPapersByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("attach deep-search paper metadata: %w", err)
+	}
+	paperMap := make(map[string]*Paper, len(papers))
+	for _, paper := range papers {
+		p := paper
+		paperMap[paper.ID] = &p
+	}
+	for i := range results {
+		results[i].Paper = paperMap[results[i].PaperID]
 	}
 
 	return results, nil
@@ -257,7 +260,7 @@ func (c *Cache) SimilarPaperMap(ctx context.Context, paperID string, limit int) 
 		limit = 80
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, nil, fmt.Errorf("similar paper maps require PostgreSQL with pgvector")
+		return nil, nil, c.capabilityError("similar paper maps")
 	}
 
 	query := `
@@ -341,11 +344,13 @@ func (c *Cache) SimilarPaperMap(ctx context.Context, paperID string, limit int) 
 	}
 
 	paperMap := map[string]*Paper{}
-	if papers, err := c.GetPapersByIDs(ctx, ids); err == nil {
-		for _, paper := range papers {
-			p := paper
-			paperMap[paper.ID] = &p
-		}
+	papers, err := c.GetPapersByIDs(ctx, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("attach semantic-map paper metadata: %w", err)
+	}
+	for _, paper := range papers {
+		p := paper
+		paperMap[paper.ID] = &p
 	}
 
 	for i := range results {
@@ -363,7 +368,7 @@ func (c *Cache) SimilarPaperMapQwen(ctx context.Context, paperID string, limit i
 		limit = 80
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, nil, fmt.Errorf("similar paper maps require PostgreSQL with pgvector")
+		return nil, nil, c.capabilityError("qwen similar paper maps")
 	}
 
 	sqlDB, err := c.db.DB()
@@ -455,11 +460,13 @@ func (c *Cache) SimilarPaperMapQwen(ctx context.Context, paperID string, limit i
 	}
 
 	paperMap := map[string]*Paper{}
-	if papers, err := c.GetPapersByIDs(ctx, ids); err == nil {
-		for _, paper := range papers {
-			p := paper
-			paperMap[paper.ID] = &p
-		}
+	papers, err := c.GetPapersByIDs(ctx, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("attach qwen semantic-map paper metadata: %w", err)
+	}
+	for _, paper := range papers {
+		p := paper
+		paperMap[paper.ID] = &p
 	}
 
 	for i := range results {
@@ -477,7 +484,7 @@ func (c *Cache) SimilarPapers(ctx context.Context, paperID string, limit int) ([
 		limit = 24
 	}
 	if c.dbType != DBTypePostgres {
-		return nil, fmt.Errorf("similar papers require PostgreSQL with pgvector")
+		return nil, c.capabilityError("similar papers")
 	}
 
 	query := `
@@ -514,7 +521,7 @@ func (c *Cache) SimilarPapers(ctx context.Context, paperID string, limit int) ([
 		return nil, err
 	}
 
-	return c.attachPaperDetails(ctx, results), nil
+	return c.attachPaperDetails(ctx, results)
 }
 
 // float32SliceToVectorString converts a float32 slice to pgvector format: [0.1,0.2,...]
@@ -885,75 +892,33 @@ func labelSemanticClusters(rows []semanticVectorRow, coords [][2]float64, assign
 }
 
 func buildSemanticLinks(rows []semanticVectorRow) []SemanticMapLink {
-	type linkKey struct {
-		a string
-		b string
-	}
-	linkScores := map[linkKey]float64{}
-	addLink := func(i, j int, strength float64) {
-		if i == j || strength <= 0 {
-			return
-		}
-		a, b := rows[i].PaperID, rows[j].PaperID
-		if a > b {
-			a, b = b, a
-		}
-		key := linkKey{a: a, b: b}
-		if strength > linkScores[key] {
-			linkScores[key] = strength
-		}
+	if len(rows) < 2 {
+		return []SemanticMapLink{}
 	}
 
-	for i := range rows {
-		neighborCount := 2
-		if rows[i].Anchor {
-			neighborCount = 8
-		}
-		topIndex := make([]int, 0, neighborCount)
-		topScore := make([]float64, 0, neighborCount)
-		for j := range rows {
-			if i == j {
-				continue
-			}
+	// Connect each point to its nearest previously ranked point. This produces a
+	// bounded similarity tree rather than inventing a cyclic relationship graph.
+	links := make([]SemanticMapLink, 0, len(rows)-1)
+	for i := 1; i < len(rows); i++ {
+		bestIndex := 0
+		bestScore := cosine(rows[i].Vector, rows[0].Vector)
+		for j := 1; j < i; j++ {
 			score := cosine(rows[i].Vector, rows[j].Vector)
-			insertTopNeighbor(&topIndex, &topScore, j, score, neighborCount)
+			if score > bestScore {
+				bestIndex = j
+				bestScore = score
+			}
 		}
-		for idx, j := range topIndex {
-			addLink(i, j, topScore[idx])
-		}
-	}
-
-	links := make([]SemanticMapLink, 0, len(linkScores))
-	for key, strength := range linkScores {
 		links = append(links, SemanticMapLink{
-			Source:   key.a,
-			Target:   key.b,
-			Strength: roundSimilarity(strength),
+			Source:   rows[bestIndex].PaperID,
+			Target:   rows[i].PaperID,
+			Strength: roundSimilarity(bestScore),
 		})
 	}
 	sort.Slice(links, func(i, j int) bool {
 		return links[i].Strength > links[j].Strength
 	})
 	return links
-}
-
-func insertTopNeighbor(indices *[]int, scores *[]float64, index int, score float64, limit int) {
-	pos := sort.Search(len(*scores), func(i int) bool {
-		return (*scores)[i] < score
-	})
-	if pos >= limit {
-		return
-	}
-	*indices = append(*indices, index)
-	*scores = append(*scores, score)
-	copy((*indices)[pos+1:], (*indices)[pos:])
-	copy((*scores)[pos+1:], (*scores)[pos:])
-	(*indices)[pos] = index
-	(*scores)[pos] = score
-	if len(*indices) > limit {
-		*indices = (*indices)[:limit]
-		*scores = (*scores)[:limit]
-	}
 }
 
 func addTerms(scores map[string]float64, text string, weight float64) {
@@ -1092,14 +1057,14 @@ func getPaperIDs(results []SemanticResult) []string {
 	return ids
 }
 
-func (c *Cache) attachPaperDetails(ctx context.Context, results []SemanticResult) []SemanticResult {
+func (c *Cache) attachPaperDetails(ctx context.Context, results []SemanticResult) ([]SemanticResult, error) {
 	if len(results) == 0 {
-		return []SemanticResult{}
+		return []SemanticResult{}, nil
 	}
 
 	papers, err := c.GetPapersByIDs(ctx, getPaperIDs(results))
 	if err != nil {
-		return results
+		return nil, fmt.Errorf("attach semantic paper metadata: %w", err)
 	}
 
 	paperMap := make(map[string]*Paper, len(papers))
@@ -1113,7 +1078,7 @@ func (c *Cache) attachPaperDetails(ctx context.Context, results []SemanticResult
 			results[i].Paper = paper
 		}
 	}
-	return results
+	return results, nil
 }
 
 func (c *Cache) GetPapersByIDs(ctx context.Context, ids []string) ([]Paper, error) {

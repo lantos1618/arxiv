@@ -2,16 +2,19 @@ package arxiv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -36,6 +39,26 @@ const (
 	DBTypePostgres DBType = "postgres"
 )
 
+// ErrCapabilityUnavailable identifies features that the configured backend
+// cannot provide. Callers can use errors.Is without matching error strings.
+var ErrCapabilityUnavailable = errors.New("capability unavailable")
+
+// CapabilityError reports a backend-specific feature limitation.
+type CapabilityError struct {
+	Capability string
+	Backend    DBType
+}
+
+func (e *CapabilityError) Error() string {
+	return fmt.Sprintf("%s is unavailable on %s", e.Capability, e.Backend)
+}
+
+func (e *CapabilityError) Unwrap() error { return ErrCapabilityUnavailable }
+
+func (c *Cache) capabilityError(capability string) error {
+	return &CapabilityError{Capability: capability, Backend: c.dbType}
+}
+
 // Cache manages a local offline cache of arXiv papers.
 type Cache struct {
 	root     string
@@ -56,6 +79,14 @@ type Cache struct {
 	adminStatsRefreshMu sync.Mutex
 	cachedAdminStats    *AdminStats
 	adminStatsUpdated   time.Time
+	apiKeyMu            sync.Mutex
+
+	// Detail-page caches and guards keep expensive author/citation endpoints
+	// from consuming the whole Postgres pool under crawler or burst traffic.
+	detailLRU        *LRUCache
+	authorQuerySem   chan struct{}
+	citationQuerySem chan struct{}
+	detailFlights    singleflight.Group
 }
 
 // DBType returns the database type in use.
@@ -63,8 +94,10 @@ func (c *Cache) DBType() DBType {
 	return c.dbType
 }
 
-// Open opens or creates an arXiv cache at the given root directory.
-// If DATABASE_URL env var is set, uses PostgreSQL; otherwise uses SQLite.
+// Open opens the production PostgreSQL cache when DATABASE_URL is configured.
+// Without DATABASE_URL it opens the legacy SQLite backend retained for tests,
+// migration, and offline compatibility; PostgreSQL-only methods return typed
+// CapabilityError values instead of pretending to fall back.
 func Open(root string) (*Cache, error) {
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
@@ -92,7 +125,7 @@ func Open(root string) (*Cache, error) {
 		dbType = DBTypePostgres
 		fmt.Println("Connected to PostgreSQL database")
 	} else {
-		// Fall back to SQLite
+		// SQLite is retained for tests, migration, and legacy offline caches only.
 		dbPath := filepath.Join(root, "index.db")
 		db, err = gorm.Open(sqlite.Open(dbPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous=NORMAL"), &gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
@@ -101,28 +134,57 @@ func Open(root string) (*Cache, error) {
 			return nil, fmt.Errorf("open sqlite database: %w", err)
 		}
 		dbType = DBTypeSQLite
-		fmt.Println("Using SQLite database")
+		log.Println("Using legacy SQLite backend (test/offline compatibility only)")
 	}
 
 	// Configure connection pool for PostgreSQL
 	if dbType == DBTypePostgres {
 		sqlDB, _ := db.DB()
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(100)
+		maxOpen := envInt("ARXIV_DB_MAX_OPEN_CONNS", 30)
+		maxIdle := envInt("ARXIV_DB_MAX_IDLE_CONNS", 10)
+		if maxOpen < 1 {
+			maxOpen = 30
+		}
+		if maxIdle < 0 {
+			maxIdle = 0
+		}
+		if maxIdle > maxOpen {
+			maxIdle = maxOpen
+		}
+		sqlDB.SetMaxIdleConns(maxIdle)
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	}
 
 	// LRU cache size: with 15GB+ RAM, we can cache hundreds of thousands of papers
 	lruSize := 500000
 	c := &Cache{
-		root:     root,
-		db:       db,
-		dbType:   dbType,
-		paperLRU: NewLRUCache(lruSize),
+		root:             root,
+		db:               db,
+		dbType:           dbType,
+		paperLRU:         NewLRUCache(lruSize),
+		detailLRU:        NewLRUCache(envInt("ARXIV_DETAIL_CACHE_SIZE", 20000)),
+		authorQuerySem:   newSemaphore(envInt("ARXIV_AUTHOR_QUERY_CONCURRENCY", 4)),
+		citationQuerySem: newSemaphore(envInt("ARXIV_CITATION_QUERY_CONCURRENCY", 4)),
 	}
 	if err := c.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return c, nil
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("invalid %s=%q, using %d", name, value, fallback)
+		return fallback
+	}
+	return parsed
 }
 
 // Close closes the cache database.
@@ -155,21 +217,28 @@ func (c *Cache) initSchema() error {
 		&Citation{},
 		&CategoryStat{},
 		&SyncState{},
-		&DownloadQueueItem{},
 		&Embedding{},
 		&EmbeddingV2{},
 		&PaperChunk{},
 		&ChunkEmbeddingV2{},
+		&QwenEmbeddingJob{},
+		&QwenQueryEmbedding{},
 		&EmbeddingJob{},
 		&AuthorCollaboration{},
 		&AuthorEmbedding{},
 		&User{},
 		&LoginCode{},
 		&UserSession{},
+		&UserAPIKey{},
 		&UserPaperView{},
+		&FeedbackPost{},
+		&FeedbackVote{},
 		&AdminAuditLog{},
 	); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
+	}
+	if err := c.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_api_keys_active_name ON user_api_keys(user_id, name) WHERE revoked_at IS NULL`).Error; err != nil {
+		return fmt.Errorf("create active api key index: %w", err)
 	}
 
 	if c.dbType == DBTypePostgres {
@@ -220,7 +289,7 @@ func (c *Cache) initSQLiteSchema() error {
 	END;
 	`
 	if err := c.db.Exec(ftsSchema).Error; err != nil {
-		fmt.Printf("Warning: FTS5 not available (%v), full-text search will use fallback methods\n", err)
+		log.Printf("Warning: legacy SQLite FTS5 unavailable; SQLite full-text search is disabled: %v", err)
 	}
 	return nil
 }
@@ -285,6 +354,17 @@ func (c *Cache) initPostgresSchema() error {
 		return err
 	}
 
+	// Existing rows predate the trigger. Backfill only missing vectors so normal
+	// startup does not rewrite the whole papers table.
+	if err := c.execPostgresSchema(`
+		UPDATE papers SET search_vector =
+			setweight(to_tsvector('english', COALESCE(title, '')), 'A') ||
+			setweight(to_tsvector('english', COALESCE(abstract, '')), 'B')
+		WHERE search_vector IS NULL
+	`); err != nil {
+		return err
+	}
+
 	// Create HNSW index for fast vector similarity search (pgvector)
 	// This dramatically improves semantic search performance at scale
 	if err := c.execPostgresSchema(`ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS vector vector(384)`); err != nil {
@@ -323,6 +403,18 @@ func (c *Cache) initPostgresSchema() error {
 	if err := c.execPostgresSchema(`CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_v2_lookup ON chunk_embeddings_v2(model, dim, chunk_id)`); err != nil {
 		return err
 	}
+	if err := c.execPostgresSchema(`CREATE INDEX IF NOT EXISTS idx_qwen_embedding_jobs_queue ON qwen_embedding_jobs(status, priority DESC, created_at)`); err != nil {
+		return err
+	}
+	if err := c.execPostgresSchema(`CREATE INDEX IF NOT EXISTS idx_qwen_embedding_jobs_lease ON qwen_embedding_jobs(status, lease_until)`); err != nil {
+		return err
+	}
+	if err := c.execPostgresSchema(`ALTER TABLE qwen_query_embeddings ADD COLUMN IF NOT EXISTS vector vector(1024)`); err != nil {
+		return err
+	}
+	if err := c.execPostgresSchema(`CREATE INDEX IF NOT EXISTS idx_qwen_query_embeddings_lookup ON qwen_query_embeddings(query_hash, model, dim)`); err != nil {
+		return err
+	}
 
 	// Add vector column to author_embeddings for pgvector
 	if err := c.execPostgresSchema(`ALTER TABLE author_embeddings ADD COLUMN IF NOT EXISTS vector vector(384)`); err != nil {
@@ -341,14 +433,28 @@ func (c *Cache) initPostgresSchema() error {
 }
 
 func (c *Cache) execPostgresSchema(query string) error {
-	if err := c.db.Exec(query).Error; err != nil {
+	err := c.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SET LOCAL lock_timeout = '2s'`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(query).Error
+	})
+	if err != nil {
 		preview := strings.Join(strings.Fields(query), " ")
 		if len(preview) > 120 {
 			preview = preview[:120] + "..."
 		}
+		if isPostgresLockTimeout(err) {
+			return fmt.Errorf("required postgres schema statement timed out acquiring lock: %s: %w", preview, err)
+		}
 		return fmt.Errorf("postgres schema: %s: %w", preview, err)
 	}
 	return nil
+}
+
+func isPostgresLockTimeout(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "SQLSTATE 55P03") || strings.Contains(strings.ToLower(msg), "lock timeout")
 }
 
 // Stats returns cache statistics, served from an in-memory cache to avoid
@@ -409,17 +515,15 @@ func (c *Cache) refreshStatsLocked(ctx context.Context) (*CacheStats, error) {
 		return nil, err
 	}
 
-	if err := c.db.WithContext(ctx).Model(&DownloadQueueItem{}).Count(&stats.QueuedDownloads).Error; err != nil {
-		return nil, err
-	}
-
 	if err := c.db.WithContext(ctx).Model(&Embedding{}).Count(&stats.EmbeddingsCount).Error; err != nil {
 		return nil, err
 	}
-	if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
-		Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
-		Count(&stats.QwenEmbeddingsCount).Error; err != nil {
-		return nil, err
+	if c.dbType == DBTypePostgres {
+		if err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
+			Where("scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
+			Count(&stats.QwenEmbeddingsCount).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	c.statsMu.Lock()
@@ -436,7 +540,9 @@ func (c *Cache) refreshStatsLocked(ctx context.Context) (*CacheStats, error) {
 func (c *Cache) StartStatsRefresh(ctx context.Context) {
 	// Warm the cache on startup (background so it doesn't block server start)
 	go func() {
-		if _, err := c.refreshStats(context.Background()); err != nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if _, err := c.refreshStats(refreshCtx); err != nil {
 			log.Printf("stats warm refresh failed: %v", err)
 		}
 	}()
@@ -450,7 +556,10 @@ func (c *Cache) StartStatsRefresh(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := c.refreshStats(context.Background()); err != nil {
+				refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, err := c.refreshStats(refreshCtx)
+				cancel()
+				if err != nil {
 					log.Printf("stats background refresh failed: %v", err)
 				}
 			}
@@ -474,6 +583,9 @@ func (c *Cache) HasEmbedding(ctx context.Context, paperID string) bool {
 
 // HasQwenEmbedding checks if a paper has a Qwen abstract embedding.
 func (c *Cache) HasQwenEmbedding(ctx context.Context, paperID string) bool {
+	if c.dbType != DBTypePostgres {
+		return false
+	}
 	var count int64
 	c.db.WithContext(ctx).Model(&EmbeddingV2{}).
 		Where("paper_id = ? AND scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", paperID, "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
@@ -520,6 +632,9 @@ func (c *Cache) GetQwenEmbeddingIDsFor(ctx context.Context, paperIDs []string) (
 	if len(paperIDs) == 0 {
 		return map[string]bool{}, nil
 	}
+	if c.dbType != DBTypePostgres {
+		return map[string]bool{}, nil
+	}
 	var ids []string
 	err := c.db.WithContext(ctx).Model(&EmbeddingV2{}).
 		Where("paper_id IN ? AND scope = ? AND model = ? AND dim = ? AND vector IS NOT NULL", paperIDs, "abstract", qwenEmbeddingModel, qwenEmbeddingDim).
@@ -537,7 +652,7 @@ func (c *Cache) GetQwenEmbeddingIDsFor(ctx context.Context, paperIDs []string) (
 // StoreQwenAbstractEmbedding stores one Qwen abstract embedding.
 func (c *Cache) StoreQwenAbstractEmbedding(ctx context.Context, paperID, sourceHash string, textChars, tokenEstimate int, embedding []float32) error {
 	if c.dbType != DBTypePostgres {
-		return fmt.Errorf("qwen embeddings require PostgreSQL with pgvector")
+		return c.capabilityError("qwen embeddings")
 	}
 	if len(embedding) != qwenEmbeddingDim {
 		return fmt.Errorf("qwen embedding has %d dimensions, want %d", len(embedding), qwenEmbeddingDim)
@@ -570,9 +685,11 @@ func (c *Cache) StoreQwenAbstractEmbedding(ctx context.Context, paperID, sourceH
 
 // CacheStats contains statistics about the cache.
 type CacheStats struct {
-	TotalPapers         int64
-	PDFsDownloaded      int64
-	SourcesDownloaded   int64
+	TotalPapers       int64
+	PDFsDownloaded    int64
+	SourcesDownloaded int64
+	// QueuedDownloads is retained for response compatibility. The obsolete
+	// download_queue table has no producer or worker and is never reported.
 	QueuedDownloads     int64
 	EmbeddingsCount     int64
 	QwenEmbeddingsCount int64

@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.error
@@ -41,7 +42,15 @@ def source_hash(text):
 
 
 def vector_literal(embedding):
-    return "[" + ",".join(str(float(value)) for value in embedding) + "]"
+    values = []
+    for index, value in enumerate(embedding):
+        if value is None:
+            raise ValueError(f"embedding contains null at index {index}")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"embedding contains non-finite value at index {index}")
+        values.append(str(number))
+    return "[" + ",".join(values) + "]"
 
 
 def encode_remote(service_url, texts, timeout):

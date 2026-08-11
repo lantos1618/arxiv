@@ -39,10 +39,14 @@ func (c *Cache) RecordUserPaperView(ctx context.Context, userID, paperID string)
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
+	viewCountIncrement := gorm.Expr("view_count + ?", 1)
+	if c.dbType == DBTypePostgres {
+		viewCountIncrement = gorm.Expr("user_paper_views.view_count + ?", 1)
+	}
 	return c.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}, {Name: "paper_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"view_count":     gorm.Expr("view_count + ?", 1),
+			"view_count":     viewCountIncrement,
 			"last_viewed_at": now,
 			"updated_at":     now,
 		}),

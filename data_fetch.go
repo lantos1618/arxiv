@@ -3,13 +3,18 @@ package arxiv
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const apiBaseURL = "https://export.arxiv.org/api/query"
@@ -17,6 +22,7 @@ const absBaseURL = "https://arxiv.org/abs"
 const arxivFetchUserAgent = "arxiv.gg metadata fetcher (https://arxiv.gg)"
 
 var (
+	validArxivIDPattern    = regexp.MustCompile(`(?i)^(?:\d{4}\.\d{4,6}|(?:acc-phys|adap-org|alg-geom|ao-sci|astro-ph|atom-ph|bayes-an|chao-dyn|chem-ph|cmp-lg|comp-gas|cond-mat|cs|dg-ga|funct-an|gr-qc|hep-ex|hep-lat|hep-ph|hep-th|math|math-ph|mtrl-th|nlin|nucl-ex|nucl-th|patt-sol|physics|plasm-ph|q-alg|quant-ph|solv-int|supr-con)/\d{7})(?:v\d+)?$`)
 	metaTagPattern         = regexp.MustCompile(`(?is)<meta\s+[^>]*>`)
 	htmlAttributePattern   = regexp.MustCompile(`(?is)([a-z_:.-]+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>/]+))`)
 	subjectCellPattern     = regexp.MustCompile(`(?is)<td[^>]*class=["'][^"']*\bsubjects\b[^"']*["'][^>]*>(.*?)</td>`)
@@ -24,15 +30,33 @@ var (
 	duplicateSpacePattern  = regexp.MustCompile(`\s+`)
 )
 
+// PartialMetadataError reports IDs omitted from an otherwise valid arXiv batch
+// response. Callers receive successfully stored papers alongside this error.
+type PartialMetadataError struct {
+	MissingIDs []string
+}
+
+func (e *PartialMetadataError) Error() string {
+	return fmt.Sprintf("metadata response omitted %d requested paper(s): %s", len(e.MissingIDs), strings.Join(e.MissingIDs, ", "))
+}
+
 // Fetch retrieves a paper's metadata directly from arXiv API and stores it.
 // This is for fetching individual papers without a full OAI-PMH sync.
 func (c *Cache) Fetch(ctx context.Context, id string) (*Paper, error) {
+	id = strings.TrimSpace(id)
+	if !ValidArxivID(id) {
+		return nil, fmt.Errorf("invalid arXiv ID")
+	}
 	paper, err := c.GetPaper(ctx, id)
 	if err == nil {
 		now := time.Now()
-		paper.FetchedAt = &now
-		c.db.WithContext(ctx).Save(paper)
-		return paper, nil
+		if err := c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", id).Update("fetched_at", now).Error; err != nil {
+			return nil, fmt.Errorf("update fetched time: %w", err)
+		}
+		return c.GetPaperFresh(ctx, id)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("get paper: %w", err)
 	}
 
 	// Fetch from arXiv API
@@ -45,11 +69,10 @@ func (c *Cache) Fetch(ctx context.Context, id string) (*Paper, error) {
 	now := time.Now()
 	paper.MetadataUpdated = &now
 	paper.FetchedAt = &now
-	if err := c.db.WithContext(ctx).Save(paper).Error; err != nil {
+	if err := c.upsertFetchedPaper(ctx, paper); err != nil {
 		return nil, fmt.Errorf("store paper: %w", err)
 	}
-
-	return paper, nil
+	return c.GetPaperFresh(ctx, paper.ID)
 }
 
 // FetchMetadataOnly fetches just the metadata (title, authors, abstract) without downloading source.
@@ -69,8 +92,13 @@ func (c *Cache) FetchBatch(ctx context.Context, ids []string) ([]*Paper, error) 
 	var missing []string
 	var existing []*Paper
 	for _, id := range ids {
+		if !ValidArxivID(id) {
+			return existing, fmt.Errorf("invalid arXiv ID")
+		}
 		if paper, err := c.GetPaper(ctx, id); err == nil {
 			existing = append(existing, paper)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return existing, fmt.Errorf("get paper %s: %w", id, err)
 		} else {
 			missing = append(missing, id)
 		}
@@ -81,9 +109,12 @@ func (c *Cache) FetchBatch(ctx context.Context, ids []string) ([]*Paper, error) 
 	}
 
 	// Batch fetch from arXiv API (comma-separated IDs)
-	url := fmt.Sprintf("%s?id_list=%s&max_results=%d", apiBaseURL, strings.Join(missing, ","), len(missing))
+	values := url.Values{}
+	values.Set("id_list", strings.Join(missing, ","))
+	values.Set("max_results", fmt.Sprintf("%d", len(missing)))
+	requestURL := apiBaseURL + "?" + values.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return existing, err
 	}
@@ -98,7 +129,7 @@ func (c *Cache) FetchBatch(ctx context.Context, ids []string) ([]*Paper, error) 
 		return existing, fmt.Errorf("http %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, 16<<20)
 	if err != nil {
 		return existing, err
 	}
@@ -109,21 +140,57 @@ func (c *Cache) FetchBatch(ctx context.Context, ids []string) ([]*Paper, error) 
 	}
 
 	// Store each paper
+	returned := make(map[string]bool, len(feed.Entries))
 	for _, entry := range feed.Entries {
 		paper := parseAtomEntry(entry)
 		if paper.ID == "" {
 			continue
 		}
+		returned[paper.ID] = true
 
 		now := time.Now()
 		paper.MetadataUpdated = &now
 		paper.FetchedAt = &now
-		if err := c.db.WithContext(ctx).Save(paper).Error; err == nil {
-			existing = append(existing, paper)
+		if err := c.upsertFetchedPaper(ctx, paper); err != nil {
+			return existing, fmt.Errorf("store paper %s: %w", paper.ID, err)
 		}
+		stored, err := c.GetPaperFresh(ctx, paper.ID)
+		if err != nil {
+			return existing, fmt.Errorf("reload paper %s: %w", paper.ID, err)
+		}
+		existing = append(existing, stored)
+	}
+	missingReturned := omittedMetadataIDs(missing, returned)
+	if len(missingReturned) > 0 {
+		return existing, &PartialMetadataError{MissingIDs: missingReturned}
 	}
 
 	return existing, nil
+}
+
+func omittedMetadataIDs(requested []string, returned map[string]bool) []string {
+	omitted := make([]string, 0)
+	for _, id := range requested {
+		if !returned[id] {
+			omitted = append(omitted, id)
+		}
+	}
+	return omitted
+}
+
+func (c *Cache) upsertFetchedPaper(ctx context.Context, paper *Paper) error {
+	if err := c.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"created", "updated", "title", "abstract", "authors", "categories",
+			"comments", "journal_ref", "doi", "license", "metadata_updated", "fetched_at",
+		}),
+	}).Create(paper).Error; err != nil {
+		return err
+	}
+	c.paperLRU.Delete(paper.ID)
+	c.detailLRU.Clear()
+	return nil
 }
 
 // PrefetchReferenceTitles fetches metadata for all uncached references of a paper.
@@ -146,6 +213,7 @@ func (c *Cache) PrefetchReferenceTitles(ctx context.Context, paperID string) err
 	}
 
 	// Batch fetch in chunks of 50 (arXiv limit is ~100)
+	var fetchErrors []error
 	for i := 0; i < len(uncached); i += 50 {
 		end := i + 50
 		if end > len(uncached) {
@@ -154,17 +222,22 @@ func (c *Cache) PrefetchReferenceTitles(ctx context.Context, paperID string) err
 		chunk := uncached[i:end]
 
 		if _, err := c.FetchBatch(ctx, chunk); err != nil {
-			// Non-fatal, continue with next chunk
-			continue
+			fetchErrors = append(fetchErrors, err)
 		}
 
 		// Rate limit between batches
 		if end < len(uncached) {
-			time.Sleep(1 * time.Second)
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return errors.Join(append(fetchErrors, ctx.Err())...)
+			case <-timer.C:
+			}
 		}
 	}
 
-	return nil
+	return errors.Join(fetchErrors...)
 }
 
 // FetchAndDownload fetches metadata and downloads source/PDF for a paper.
@@ -181,15 +254,6 @@ func (c *Cache) FetchAndDownload(ctx context.Context, id string, opts *DownloadO
 	paper, err = c.GetPaper(ctx, id)
 	if err != nil {
 		return paper, err
-	}
-
-	if opts.GenerateEmbedding {
-		go func() {
-			bgCtx := context.Background()
-			if err := c.GenerateEmbeddingForPaper(bgCtx, id); err != nil {
-				fmt.Printf("Warning: failed to generate embedding for %s: %v\n", id, err)
-			}
-		}()
 	}
 
 	return paper, nil
@@ -210,12 +274,17 @@ func fetchPaperMetadata(ctx context.Context, id string) (*Paper, error) {
 }
 
 func fetchPaperMetadataAtom(ctx context.Context, id string) (*Paper, error) {
-	url := fmt.Sprintf("%s?id_list=%s", apiBaseURL, id)
+	if !ValidArxivID(id) {
+		return nil, fmt.Errorf("invalid arXiv ID")
+	}
+	values := url.Values{}
+	values.Set("id_list", id)
+	requestURL := apiBaseURL + "?" + values.Encode()
 
 	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +300,7 @@ func fetchPaperMetadataAtom(ctx context.Context, id string) (*Paper, error) {
 		return nil, fmt.Errorf("http %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, 2<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +354,9 @@ func fetchPaperMetadataAtom(ctx context.Context, id string) (*Paper, error) {
 }
 
 func fetchPaperMetadataHTML(ctx context.Context, id string) (*Paper, error) {
+	if !ValidArxivID(id) {
+		return nil, fmt.Errorf("invalid arXiv ID")
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -304,7 +376,7 @@ func fetchPaperMetadataHTML(ctx context.Context, id string) (*Paper, error) {
 		return nil, fmt.Errorf("http %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	body, err := readLimitedBody(resp.Body, 2<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +386,21 @@ func fetchPaperMetadataHTML(ctx context.Context, id string) (*Paper, error) {
 		return nil, err
 	}
 	return paper, nil
+}
+
+func ValidArxivID(id string) bool {
+	return validArxivIDPattern.MatchString(strings.TrimSpace(id))
+}
+
+func readLimitedBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("response exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 func parseArxivHTMLMetadata(requestedID, body string) (*Paper, error) {

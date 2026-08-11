@@ -1,89 +1,62 @@
 # Testing
 
-## Test Files
+## Go Suite
 
-The project includes comprehensive tests for core functionality:
+The current tree contains root-package tests for auth/API keys, fetch and sync behavior, exports/sitemaps, feedback, Qwen queues, semantic search, and cross-cutting review regressions. `cmd/arxiv` tests admin auth, API error handling, Qwen HTTP behavior, feedback handlers, MCP, security regressions, and SEO. `cmd/migrate` tests migration failures and data handling.
 
-### `semantic_test.go`
-- `TestCosineSimilarity` - Tests cosine similarity calculation (same vectors, orthogonal vectors, edge cases)
-- `TestStoreEmbedding` - Tests embedding storage and retrieval
-- `TestSearchSemantic` - Tests semantic search with empty and populated databases
-
-### `embeddings_test.go`
-- `TestEmbeddingSerialization` - Tests that embedding serialization/deserialization preserves values
-- `TestEmbeddingSerializationEmpty` - Tests error handling for empty embeddings
-- `TestEmbeddingDeserializationInvalid` - Tests error handling for invalid embedding data
-- `TestListPapersWithoutEmbeddings` - Tests listing papers that need embeddings
-- `TestCountEmbeddings` - Tests counting embeddings in the database
-
-### `cache_test.go`
-- `TestCacheOpen` - Tests cache initialization
-- `TestCacheStats` - Tests statistics retrieval
-- `TestCachePaperOperations` - Tests paper creation, retrieval, and existence checks
-
-### `search_test.go`
-- `TestSearchEmpty` - Tests search on empty cache
-- `TestSearchWithPapers` - Tests keyword search with papers and category filtering
-- `TestSearchByAuthor` - Tests author-based search
-
-## Running Tests
+List the authoritative current inventory instead of relying on a copied count:
 
 ```bash
-# Run all tests
+find . -name '*_test.go' -not -path './.git/*' -print | sort
+go test -list . ./...
+```
+
+## Validation Commands
+
+```bash
+# Focused package/test
+go test ./... -run TestName
+
+# Full unit/HTTP suite
 go test ./...
 
-# Run with verbose output
-go test -v ./...
+# Concurrency checks
+go test -race ./...
 
-# Run specific test
-go test -v -run TestStoreEmbedding
+# Static analysis and patch hygiene
+go vet ./...
+git diff --check
 
-# Run tests with coverage
-go test -cover ./...
-
-# Generate coverage report
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+# Python and shell syntax used by workers
+python3 -m compileall -q tools
+bash -n start.sh tools/*.sh deploy/systemd/*
 ```
 
-## Test Coverage
+Most Go database tests explicitly clear `DATABASE_URL` and use temporary SQLite databases. That is useful for deterministic unit tests but does not establish production PostgreSQL correctness.
 
-Current test coverage includes:
-- ✅ Embedding storage and retrieval
-- ✅ Semantic search functionality
-- ✅ Cosine similarity calculation
-- ✅ Cache operations
-- ✅ Paper CRUD operations
-- ✅ Keyword search (with FTS5 fallback handling)
-- ✅ Author search
+## Required Integration Coverage
 
-## Notes
+Before deploying changes in these areas, add focused validation:
 
-- Tests use temporary directories created with `t.TempDir()`
-- FTS5 may not be available in test environments - tests handle this gracefully
-- All tests are isolated and can run in parallel
-- Tests use the same `package arxiv` as the main code
+- **PostgreSQL/pgvector:** fresh schema, upgrade from a production-like copy, required extensions/indexes, lock timeout/failure behavior, and `deploy/sql/2026-07-11-qwen-vector-not-null.sql` preconditions.
+- **Qwen:** service health, query fallback markers, abstract and chunk hash freshness, non-NULL dimensions, leased claim/heartbeat/complete/fail fencing, ambiguous completion retry, and multiple workers.
+- **HTTP/proxy:** real reverse proxy, trusted/untrusted forwarding headers, rate limits, request/body limits, SSE disconnects, SIGTERM shutdown, and public error redaction.
+- **Accounts/security:** Google OAuth callback, session cookies, API-key rotation, same-origin mutation checks, admin allowlists/tokens, and worker tokens.
+- **Deployment:** clean immutable image, schema backup, PostgreSQL health identity, preserved volume, exact-image rollback, and schema compatibility after rollback.
 
-## Adding New Tests
+## Qwen Smoke Test
 
-When adding new functionality, add corresponding tests:
+```bash
+QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
+python3 tools/qwen_pipeline_check.py \
+  --scope both --window-minutes 15 --min-recent 1
 
-1. Create a `*_test.go` file in the same package
-2. Use `t.TempDir()` for test data
-3. Test both success and error cases
-4. Use descriptive test names: `TestFunctionName_Scenario`
-
-Example:
-```go
-func TestNewFeature(t *testing.T) {
-    cacheDir := t.TempDir()
-    cache, err := Open(cacheDir)
-    if err != nil {
-        t.Fatalf("Failed to open cache: %v", err)
-    }
-    defer cache.Close()
-    
-    // Test implementation
-}
+curl --get 'http://127.0.0.1:8080/api/v1/search/semantic' \
+  --data-urlencode 'q=causal representation learning'
 ```
 
+Assert the response either identifies Qwen semantic mode or explicitly sets `fallback:true`; never accept an unmarked mode change.
+
+## Adding Tests
+
+Prefer table-driven tests for validation boundaries and regression tests for every fixed failure mode. Use `t.TempDir`, `t.Setenv`, request contexts, and deterministic fixtures. Do not depend on live arXiv, OAuth, or GPU services in the default unit suite; put those checks in explicit integration workflows.

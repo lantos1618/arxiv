@@ -1,100 +1,66 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Repository guidance for coding agents and maintainers.
 
-## Build & Test Commands
-
-```bash
-# Build
-make build              # Build binary to bin/arxiv
-go build ./cmd/arxiv    # Quick local build (no output binary)
-
-# Test
-make test               # Run all tests (120s timeout)
-make test-verbose       # Run tests with output
-go test ./... -run TestName  # Run specific test
-
-# Code quality
-make fmt                # Format code
-make vet                # Run go vet
-make check              # Run fmt + vet + test
-
-# Docker
-make docker             # Build Docker image (arxiv-cache)
-```
-
-## Production Deploy
-
-**IMPORTANT: Production uses PostgreSQL with the external `arxiv_postgres_data` Docker volume. This volume contains the cached papers and embeddings. Never deploy with commands that remove volumes or recreate Postgres storage.**
+## Commands
 
 ```bash
-cp -n .env.example .env
-# Fill .env with production POSTGRES_PASSWORD, DATABASE_URL, and ADMIN_TOKEN.
-docker compose build arxiv
-docker compose up -d --no-deps arxiv
+go build -o bin/arxiv ./cmd/arxiv
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
 ```
 
-Use `docs/DEPLOYMENT_RUNBOOK_2026-05-15.md` for the full app-only deploy flow and DB safety checks.
+Use `go test ./... -run TestName` for a focused Go test. The module requires Go 1.25.
 
-## Architecture Overview
+## Product Boundary
 
-This is an offline arXiv paper cache manager with CLI, REST API, and web UI. Requires Go 1.24+ and Python 3 (for semantic search embeddings).
+arxiv.gg is a Go CLI and web service for arXiv discovery. It provides metadata search, Qwen idea and full-paper search, paper/author/category/citation exploration, exports, REST/SSE/MCP interfaces, optional Google accounts, signed-in reading history, agent API keys, feedback, and admin operations.
 
-### Package Structure
+Do not document saved searches, alerts, billing, paid plans, private analytics, or guaranteed suggestion awards as current capabilities. The feedback offer is conditional and discretionary; see `README.md`.
 
-Single flat package (`package arxiv`) at root with 20+ files:
+## Database
 
-- **cache.go, cache_models.go, cache_lru.go, cache_paper.go** - Core cache manager, data models (Paper, Citation, Embedding, DownloadQueueItem), LRU memory cache
-- **search.go, search_embeddings.go, search_fts.go, search_pdf.go** - FTS5 full-text search, semantic vector search, PDF text search
-- **data_fetch.go, data_download.go, data_sync.go, data_oai.go** - arXiv API fetching, PDF/TeX downloads, OAI-PMH bulk sync
-- **citations.go, citations_refs.go** - Citation graph queries, TeX reference extraction
-- **export.go, export_sitemap.go** - BibTeX/RIS/JSON export, sitemap generation
+Production requires PostgreSQL with pgvector and the external `arxiv_postgres_data` volume. An empty `DATABASE_URL` selects SQLite, but SQLite is legacy/test-only and is not a supported production architecture.
 
-### CLI Application (cmd/arxiv/)
+Every `arxiv.Open` call runs GORM `AutoMigrate` and backend-specific initialization. Treat application startup as potentially schema-changing. Never remove the production volume, run destructive DDL casually, or deploy without the backup and exact-image rollback procedure in `docs/DEPLOYMENT_RUNBOOK_2026-05-15.md`.
 
-- **main.go** - CLI entry point with 8 commands (fetch, sync, stats, search, get, ls, reindex, serve)
-- **serve.go** - HTTP server with HTML templates, web UI
-- **api.go** - REST API handlers at /api/v1/
-- **middleware.go** - HTTP middleware (rate limiting, caching)
-- **templates/** - 11 embedded HTML templates
+## Semantic Architecture
 
-### Key Patterns
+Current product semantic features use only `Qwen/Qwen3-Embedding-8B` at 1,024 dimensions:
 
-1. **Context-aware**: All cache methods accept `context.Context`
-2. **GORM + raw SQL**: GORM for regular tables, raw SQL for FTS5 virtual tables
-3. **Embedded templates**: HTML compiled into binary via `//go:embed`
-4. **Pure Go SQLite**: Uses `github.com/glebarez/sqlite` (no CGO required)
+- `embeddings_v2` for title-and-abstract vectors
+- `paper_chunks` and `chunk_embeddings_v2` for full-paper retrieval
+- `qwen_embedding_jobs` and query-text storage for leased remote/local work
+- Qwen vectors for semantic search and related-paper maps
 
-### Database
+The MiniLM service, `generate_embeddings.py`, original `embeddings` table, and generic embedding worker remain compatibility/migration code. Do not build new product behavior or current docs around them.
 
-Production: **PostgreSQL with pgvector** (`arxiv-postgres` container). Fallback: SQLite with WAL mode (local dev only). Main tables: `papers`, `citations`, `embeddings`, `sync_state`, `download_queue`. PostgreSQL uses tsvector + GIN for full-text search and HNSW index for vector similarity. SQLite uses FTS5 virtual table `papers_fts`.
+## Source Layout
 
-### Web Server
+- `cmd/arxiv/main.go` — CLI dispatch and command flags
+- `cmd/arxiv/serve.go` — server configuration, routes, pages, health, and SEO handlers
+- `cmd/arxiv/api.go` — REST/SSE endpoints and Qwen worker API
+- `cmd/arxiv/mcp.go` — Streamable HTTP MCP server
+- `cmd/arxiv/auth_handlers.go`, `admin_auth.go` — Google sessions, account keys, admin and worker auth
+- `cmd/arxiv/feedback_handlers.go` — public feedback and moderation HTTP flows
+- Root package — database models, cache, ingestion, search, citations, exports, accounts, feedback, and Qwen queues
+- `tools/` — Python/shell ingestion and GPU workers
+- `deploy/` — production SQL and services
+- `docs/` — active docs plus archived snapshots
 
-```bash
-arxiv serve -port 8080           # Default gateway mode (redirects to arxiv.org)
-arxiv serve -port 8080 -local    # Local mode (serves PDFs/source locally)
-```
+## Safety And Concurrency
 
-API routes include SSE streaming search (`/api/v1/search/stream`) and semantic search (`/api/v1/search/semantic`). Admin routes exist at `/admin/embeddings`.
+- Preserve concurrent work; do not revert unrelated changes.
+- Keep public workload limits, body caps, timeouts, cancellation, and safe error redaction.
+- Maintain lease owner/generation/source-hash fencing and heartbeat behavior for Qwen jobs.
+- Make database mutations atomic and keep in-memory caches consistent with committed state.
+- Cookie-authenticated mutations must retain same-origin/CSRF protections.
+- Worker and admin secrets belong in headers or secret files, never query strings or process arguments.
 
-### Template Data
+## Local And Production Serving
 
-When modifying templates, check how data is passed in serve.go. Common pattern:
-```go
-data := map[string]any{
-    "Title":        paper.Title,
-    "Paper":        paper,
-    "HasEmbedding": s.cache.HasEmbedding(ctx, id),
-    "LocalMode":    s.localMode,
-}
-templates.ExecuteTemplate(w, "paper", data)
-```
+`arxiv serve -local` enables local download behavior, bypasses production admin checks, and binds to loopback. Normal serving binds on all interfaces and requires production auth for privileged operations.
 
-Template functions available: `truncate`, `parseAuthors`, `parseCategories`, `arxivIDToDate`, `mul`.
-
-## Development Workflow
-
-1. Build locally first: `go build ./cmd/arxiv` - catches errors before Docker build
-2. Test templates by running server locally before deploying
-3. For production: rebuild Docker image and restart container
+Set `TRUST_PROXY_HEADERS=true` only when a trusted proxy is the only ingress and overwrites forwarding headers. Validate `/health` reports PostgreSQL after every deployment.
