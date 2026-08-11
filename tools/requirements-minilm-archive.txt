@@ -1,0 +1,5 @@
+# Offline legacy migration utility only; not installed in production images.
+numpy==1.26.4
+psycopg2-binary==2.9.10
+sentence-transformers==3.4.1
+tqdm==4.67.1

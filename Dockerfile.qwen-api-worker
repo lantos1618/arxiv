@@ -1,0 +1,20 @@
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /workspace
+
+ENV HOME=/workspace \
+    HF_HOME=/workspace/.cache/huggingface \
+    PIP_CACHE_DIR=/workspace/.cache/pip \
+    PYTHONUNBUFFERED=1 \
+    QWEN_EMBEDDING_DTYPE=fp16
+
+COPY requirements-qwen-worker.txt /workspace/requirements-qwen-worker.txt
+RUN python -m pip install --no-cache-dir -r /workspace/requirements-qwen-worker.txt
+
+COPY tools/qwen_api_worker.py /workspace/qwen_api_worker.py
+RUN mkdir -p /workspace/.cache/huggingface /workspace/.cache/pip \
+    && chown -R 42420:42420 /workspace
+
+USER 42420:42420
+
+CMD ["python", "/workspace/qwen_api_worker.py", "--limit", "32", "--claim-size", "1", "--batch-size", "1"]

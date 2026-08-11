@@ -1,0 +1,160 @@
+{{define "feedback"}}
+{{template "head" .}}
+<style>
+	.shape-page { display: grid; gap: 1.5rem; }
+	.shape-hero {
+		position: relative;
+		overflow: hidden;
+		border-radius: 18px;
+		padding: clamp(1.5rem, 4vw, 3rem);
+		background: #0f172a;
+		color: #f8fafc;
+	}
+	.shape-hero::after {
+		content: "";
+		position: absolute;
+		right: -5rem;
+		bottom: -7rem;
+		width: 20rem;
+		height: 20rem;
+		border-radius: 999px;
+		background: radial-gradient(circle, rgba(37,99,235,0.5), rgba(37,99,235,0));
+		pointer-events: none;
+	}
+	.shape-eyebrow { margin: 0 0 0.6rem; color: #93c5fd; font-size: 0.78rem; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+	.shape-hero h1 { position: relative; z-index: 1; max-width: 42rem; margin: 0; font-size: clamp(2.2rem, 7vw, 4.5rem); line-height: 0.95; letter-spacing: -0.055em; }
+	.shape-lede { position: relative; z-index: 1; max-width: 42rem; margin: 1.1rem 0 0; color: #cbd5e1; font-size: clamp(1rem, 2vw, 1.2rem); line-height: 1.55; }
+	.shape-hero-actions { position: relative; z-index: 1; display: flex; gap: 0.65rem; flex-wrap: wrap; margin-top: 1.4rem; }
+	.shape-button { display: inline-flex; align-items: center; justify-content: center; min-height: 2.65rem; border: 1px solid #2563eb; border-radius: 999px; padding: 0 1rem; background: #2563eb; color: #fff; font-weight: 750; text-decoration: none; }
+	.shape-button:hover { background: #1d4ed8; text-decoration: none; }
+	.shape-button.secondary { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.08); }
+	.shape-button.secondary:hover { background: rgba(255,255,255,0.15); }
+	.shape-process { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
+	.shape-step { border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem; background: #fff; }
+	.shape-step-number { display: block; margin-bottom: 0.55rem; color: #2563eb; font: 800 0.75rem/1 system-ui, sans-serif; letter-spacing: 0.08em; }
+	.shape-step h2 { margin: 0; font-size: 1rem; }
+	.shape-step p { margin: 0.45rem 0 0; color: #64748b; font-size: 0.86rem; line-height: 1.45; }
+	.shape-layout { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: 1.25rem; align-items: start; }
+	.shape-section-head { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 0.8rem; }
+	.shape-section-head h2 { margin: 0; font-size: 1.55rem; letter-spacing: -0.025em; }
+	.shape-section-head p { max-width: 34rem; margin: 0.3rem 0 0; color: #64748b; font-size: 0.9rem; }
+	.shape-count { flex: none; border-radius: 999px; padding: 0.25rem 0.6rem; background: #eff6ff; color: #1d4ed8; font-size: 0.78rem; font-weight: 750; }
+	.shape-notice { margin: 0 0 0.85rem; border-radius: 9px; padding: 0.75rem 0.85rem; background: #ecfdf5; color: #065f46; }
+	.shape-notice.error { background: #fef2f2; color: #991b1b; }
+	.shape-ideas { display: grid; gap: 0.75rem; }
+	.shape-idea { border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem; background: #fff; }
+	.shape-idea.owned { border-color: #bfdbfe; background: #f8fbff; }
+	.shape-idea-meta { display: flex; justify-content: space-between; gap: 0.75rem; color: #64748b; font-size: 0.76rem; }
+	.shape-idea-meta strong { color: #334155; }
+	.shape-idea-body { margin: 0.65rem 0 0.85rem; color: #0f172a; white-space: pre-wrap; }
+	.shape-idea-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+	.shape-votes { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+	.shape-votes form, .shape-delete-form { margin: 0; }
+	.shape-vote, .shape-delete { min-height: 2rem; border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.7rem; background: #fff; color: #334155; font: inherit; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+	.shape-vote:hover { border-color: #93c5fd; background: #eff6ff; }
+	.shape-vote.active-up { border-color: #86efac; background: #dcfce7; color: #166534; }
+	.shape-vote.active-down { border-color: #fca5a5; background: #fee2e2; color: #991b1b; }
+	.shape-delete { border-color: #fecaca; color: #b91c1c; }
+	.shape-empty { border: 1px dashed #cbd5e1; border-radius: 12px; padding: 1.25rem; color: #64748b; text-align: center; }
+	.shape-sidebar { position: sticky; top: 1rem; display: grid; gap: 0.85rem; }
+	.shape-card { border: 1px solid #e2e8f0; border-radius: 14px; padding: 1rem; background: #f8fafc; }
+	.shape-card h2, .shape-card h3 { margin: 0; letter-spacing: -0.02em; }
+	.shape-card p { margin: 0.5rem 0 0; color: #64748b; font-size: 0.86rem; line-height: 1.5; }
+	.shape-card form { margin: 0.85rem 0 0; }
+	.shape-card textarea { width: 100%; min-height: 9rem; resize: vertical; border: 1px solid #cbd5e1; border-radius: 9px; padding: 0.75rem; background: #fff; color: #0f172a; font: inherit; }
+	.shape-card textarea:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.12); }
+	.shape-checkbox { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.7rem 0; color: #475569; font-size: 0.78rem; line-height: 1.4; }
+	.shape-submit { width: 100%; min-height: 2.65rem; border: 0; border-radius: 9px; background: #0f172a; color: #fff; font: inherit; font-weight: 800; cursor: pointer; }
+	.shape-submit:hover { background: #1e293b; }
+	.shape-tips { margin: 0.65rem 0 0; padding-left: 1.1rem; color: #475569; font-size: 0.82rem; }
+	.shape-tips li + li { margin-top: 0.35rem; }
+	.shape-terms { border-left: 3px solid #f59e0b; padding-left: 0.75rem; }
+	@media (max-width: 800px) {
+		.shape-process { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+		.shape-layout { grid-template-columns: 1fr; }
+		.shape-sidebar { position: static; order: -1; }
+	}
+	@media (max-width: 480px) {
+		.shape-process { grid-template-columns: 1fr; }
+		.shape-section-head { align-items: start; }
+	}
+</style>
+
+<main class="shape-page">
+	<header class="shape-hero">
+		<p class="shape-eyebrow">Community roadmap</p>
+		<h1>Help shape arXiv.gg</h1>
+		<p class="shape-lede">Research tools improve when the people doing the work can point to the friction. Share what slows you down, add signal to ideas you recognize, and help us choose practical improvements.</p>
+		<div class="shape-hero-actions">
+			<a class="shape-button" href="#share">Share an idea</a>
+			{{if .FeedbackCallURL}}<a class="shape-button secondary" href="{{.FeedbackCallURL}}" target="_blank" rel="noopener noreferrer">Talk for 3 minutes</a>{{end}}
+		</div>
+	</header>
+
+	<section class="shape-process" aria-label="How community feedback shapes arXiv.gg">
+		<article class="shape-step"><span class="shape-step-number">01</span><h2>Share real friction</h2><p>Describe the research task, what gets in the way, and your current workaround.</p></article>
+		<article class="shape-step"><span class="shape-step-number">02</span><h2>Add community signal</h2><p>Votes show when a problem is shared. They are useful evidence, not an automatic promise.</p></article>
+		<article class="shape-step"><span class="shape-step-number">03</span><h2>We assess the fit</h2><p>We weigh impact, feasibility, safety, maintenance cost, duplicates, and product direction.</p></article>
+		<article class="shape-step"><span class="shape-step-number">04</span><h2>Selected work ships</h2><p>Ideas we choose become focused improvements to search, discovery, reading, or research workflows.</p></article>
+	</section>
+
+	<div class="shape-layout">
+		<section id="ideas" aria-labelledby="ideas-title">
+			<div class="shape-section-head">
+				<div><h2 id="ideas-title">Ideas from the community</h2><p>Vote for problems you also experience. Popularity helps us understand demand, but does not determine the roadmap by itself.</p></div>
+				<span class="shape-count">{{len .FeedbackPosts}} ideas</span>
+			</div>
+			{{if .FeedbackNotice}}<p class="shape-notice">{{.FeedbackNotice}}</p>{{end}}
+			{{if .FeedbackError}}<p class="shape-notice error" role="alert">{{.FeedbackError}}</p>{{end}}
+			{{if .FeedbackLoadError}}<p class="shape-notice error" role="alert">{{.FeedbackLoadError}}</p>{{end}}
+			<div class="shape-ideas">
+			{{range .FeedbackPosts}}
+				<article class="shape-idea {{if .IsOwn}}owned{{end}}" id="idea-{{.ID}}">
+					<div class="shape-idea-meta"><span><strong>{{if .DisplayName}}{{.DisplayName}}{{else}}Community member{{end}}</strong>{{if .IsOwn}} · Your idea{{end}}</span><time>{{dateStamp .CreatedAt}}</time></div>
+					<p class="shape-idea-body">{{.Body}}</p>
+					<div class="shape-idea-actions">
+						<div class="shape-votes">
+						{{if $.CurrentUser}}
+							<form method="post" action="/feedback/vote"><input type="hidden" name="post_id" value="{{.ID}}"><input type="hidden" name="vote" value="1"><button class="shape-vote {{if eq .UserVote 1}}active-up{{end}}" type="submit" aria-pressed="{{if eq .UserVote 1}}true{{else}}false{{end}}">Useful · {{.UpVotes}}</button></form>
+							<form method="post" action="/feedback/vote"><input type="hidden" name="post_id" value="{{.ID}}"><input type="hidden" name="vote" value="-1"><button class="shape-vote {{if eq .UserVote -1}}active-down{{end}}" type="submit" aria-pressed="{{if eq .UserVote -1}}true{{else}}false{{end}}">Not for me · {{.DownVotes}}</button></form>
+						{{else}}
+							<a href="{{$.FeedbackLoginURL}}">Sign in to vote</a>
+						{{end}}
+						</div>
+						{{if .IsOwn}}<form class="shape-delete-form" method="post" action="/feedback/delete"><input type="hidden" name="post_id" value="{{.ID}}"><button class="shape-delete" type="submit" onclick="return confirm('Permanently delete this suggestion and its votes?');">Delete</button></form>{{end}}
+					</div>
+				</article>
+			{{else}}
+				<div class="shape-empty">No community ideas yet. Share the first problem worth solving.</div>
+			{{end}}
+			</div>
+		</section>
+
+		<aside class="shape-sidebar" id="share" aria-label="Share feedback">
+			<section class="shape-card">
+				<h2>Share an idea</h2>
+				<p>Start with the problem, not a feature name. Specific context helps us understand what success would look like.</p>
+				{{if .CurrentUser}}
+				<form method="post" action="/feedback">
+					<textarea name="body" minlength="3" maxlength="2000" required placeholder="What research task is harder than it should be? What happens today, and what would a better outcome look like?"></textarea>
+					<label class="shape-checkbox"><input type="checkbox" name="anonymous" value="1"> <span>Hide my name publicly. Administrators can still identify my account for moderation and possible reward contact.</span></label>
+					<button class="shape-submit" type="submit">Submit idea</button>
+				</form>
+				{{else}}
+				<p>Sign in to submit an idea or vote. Reading the board remains public.</p>
+				<a class="shape-button" href="{{.FeedbackLoginURL}}">Sign in to contribute</a>
+				{{end}}
+			</section>
+			<section class="shape-card">
+				<h3>Useful feedback includes</h3>
+				<ul class="shape-tips"><li>The task you were trying to complete</li><li>Where the current experience broke down</li><li>Your workaround or alternative tool</li><li>Who benefits if the problem is solved</li></ul>
+			</section>
+			<section class="shape-card shape-terms">
+				<h3>About the possible $100 reward</h3>
+				<p>We may offer $100 for a qualifying idea we select and ship. We confirm eligibility and reward terms before work starts. Posting, voting, or receiving the most votes does not guarantee selection or payment.</p>
+			</section>
+		</aside>
+	</div>
+</main>
+{{template "foot" .}}
+{{end}}

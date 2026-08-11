@@ -25,10 +25,12 @@ RUN groupadd --gid 1000 arxiv \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/arxiv --shell /usr/sbin/nologin arxiv
 
 COPY tools/requirements.txt /app/tools/requirements.txt
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r /app/tools/requirements.txt
+RUN pip install --no-cache-dir -r /app/tools/requirements.txt
 
-COPY tools/ /app/tools/
+COPY tools/chunk_full_papers.py tools/fetch_full_paper_text.py \
+    tools/qwen_backfill_common.py tools/qwen_chunk_embeddings_v2.py \
+    tools/qwen_embeddings_v2.py tools/qwen_job_worker.py \
+    tools/qwen_pipeline_check.py /app/tools/
 COPY --from=builder /build/arxiv-server .
 COPY --from=builder /build/arxiv-migrate .
 

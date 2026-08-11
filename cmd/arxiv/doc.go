@@ -25,11 +25,14 @@ metadata, PDFs, TeX source files, semantic embeddings, and citation graphs.
 
 # Fetching Papers
 
-Fetch downloads paper metadata, TeX source, and optionally PDF:
+Fetch downloads paper metadata and selected artifacts. With no artifact flag it
+downloads TeX source; artifact flags select exactly what they name:
 
 	arxiv fetch 2301.00001              # Fetch paper + TeX source
 	arxiv fetch -pdf 2301.00001         # Fetch paper + PDF only
+	arxiv fetch -source 2301.00001      # Fetch paper + TeX source
 	arxiv fetch -all 2301.00001         # Fetch paper + source + PDF
+	arxiv fetch -with-embedding 2301.00001 # Queue the canonical Qwen profile
 	arxiv fetch 2301.00001 2302.12345   # Fetch multiple papers
 
 The fetch command also extracts citation references from TeX source files
@@ -71,7 +74,7 @@ The web interface provides:
 
 Bulk sync paper metadata from arXiv's OAI-PMH API:
 
-	arxiv sync                          # Sync all papers (slow, ~2.4M records)
+	arxiv sync                          # Resume or sync all available metadata
 	arxiv sync -set cs                  # Sync only computer science papers
 	arxiv sync -from 2024-01-01         # Sync papers from date
 
@@ -83,7 +86,7 @@ Use 'arxiv fetch' to download individual papers with full content.
 The cache is stored in ARXIV_CACHE (default ~/.cache/arxiv):
 
 	~/.cache/arxiv/
-	├── index.db          # SQLite database with metadata and FTS index
+	├── index.db          # SQLite database (when DATABASE_URL is unset)
 	├── pdf/              # Downloaded PDF files
 	├── src/              # Extracted TeX source directories
 	└── meta/             # Raw metadata files
@@ -127,6 +130,7 @@ Environment:
 
 Examples:
   arxiv fetch 2301.00001       Fetch paper + TeX source
+  arxiv fetch -pdf 2301.00001  Fetch paper + PDF only
   arxiv fetch -all 2301.00001  Fetch paper + source + PDF
   arxiv search "transformer"   Search cached papers
   arxiv ls cs.AI               List papers in category

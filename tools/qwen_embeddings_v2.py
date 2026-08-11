@@ -39,11 +39,13 @@ def ensure_schema(conn):
                 token_estimate integer DEFAULT 0,
                 created timestamptz DEFAULT now(),
                 updated timestamptz DEFAULT now(),
-                vector vector(1024),
+                vector vector(1024) NOT NULL,
                 PRIMARY KEY (paper_id, scope, model, dim)
             )
             """
         )
+        cur.execute("DELETE FROM embeddings_v2 WHERE vector IS NULL")
+        cur.execute("ALTER TABLE embeddings_v2 ALTER COLUMN vector SET NOT NULL")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_v2_lookup ON embeddings_v2(scope, model, dim, paper_id)")
     conn.commit()
 
@@ -87,6 +89,7 @@ def fetch_papers(conn, model, scope, dim, limit, order, refresh_stale=False, aft
          AND e.scope = %s
          AND e.model = %s
          AND e.dim = %s
+         AND e.vector IS NOT NULL
         WHERE ({stale_clause})
         ORDER BY {order_sql}
         LIMIT %s
@@ -111,6 +114,7 @@ def fetch_papers_by_id(conn, model, scope, dim, limit, refresh_stale=False, afte
                     AND e.scope = %s
                     AND e.model = %s
                     AND e.dim = %s
+                    AND e.vector IS NOT NULL
               )
             ORDER BY p.id
             LIMIT %s
@@ -127,6 +131,7 @@ def fetch_papers_by_id(conn, model, scope, dim, limit, refresh_stale=False, afte
          AND e.scope = %s
          AND e.model = %s
          AND e.dim = %s
+         AND e.vector IS NOT NULL
         WHERE p.id > %s
           AND COALESCE(p.title, '') <> ''
           AND COALESCE(p.abstract, '') <> ''
@@ -159,14 +164,15 @@ def paper_text(title, abstract):
 
 
 def store_batch(conn, rows, embeddings, model, scope, dim):
+    if len(rows) != len(embeddings):
+        raise ValueError(f"received {len(embeddings)} embeddings for {len(rows)} rows")
     payload = []
     for (paper_id, title, abstract), embedding in zip(rows, embeddings):
         text = paper_text(title, abstract)
-        try:
-            vector = vector_literal(embedding)
-        except (TypeError, ValueError) as err:
-            print(f"store invalid embedding marker paper_id={paper_id}: {err}", flush=True)
-            vector = None
+        if embedding is None or len(embedding) != dim:
+            actual_dim = 0 if embedding is None else len(embedding)
+            raise ValueError(f"paper {paper_id} embedding has dim={actual_dim}; want {dim}")
+        vector = vector_literal(embedding)
         payload.append(
             (
                 paper_id,

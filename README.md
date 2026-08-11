@@ -1,192 +1,147 @@
 # arxiv.gg
 
-arxiv.gg is a fast, searchable arXiv discovery app with semantic search, citation graphs, author pages, category pages, exports, and an SEO-friendly public paper index.
+arxiv.gg is an arXiv discovery service and self-hostable Go application. It combines metadata search, Qwen semantic retrieval, full-paper search where text has been prepared, citation and author exploration, exports, a JSON API, and an MCP endpoint.
 
-[Live site](https://arxiv.gg) · [CLI docs](docs/CLI.md) · [API docs](docs/API.md) · [Deployment runbook](docs/DEPLOYMENT_RUNBOOK_2026-05-15.md) · [SEO report](docs/SEO_INDEXING_REPORT_2026-05-16.md)
+## Product Capabilities
 
-## What It Does
+- **Quick search** for arXiv IDs, titles, abstracts, authors, and categories.
+- **Idea search** over title-and-abstract embeddings.
+- **Deep Search** over prepared full-paper chunks; sign-in is required on the public site.
+- Paper, author, category, citation, related-work, and semantic-map pages.
+- BibTeX, RIS, and JSON exports.
+- REST, Server-Sent Events (SSE), and Streamable HTTP MCP interfaces.
+- Optional Google accounts with recently viewed papers, reader-based recommendations, and a rotatable agent API key.
+- Signed-in suggestions, voting, deletion, and administrator moderation.
 
-- Browses paper pages at canonical `/abs/{id}` URLs.
-- Searches papers by keyword, PDF text, category, author, and semantic similarity.
-- Shows paper metadata, abstracts, PDFs, citation relationships, and export formats.
-- Builds author and category discovery pages for long-tail research browsing.
-- Serves a REST API for papers, search, embeddings, citations, stats, and exports.
-- Publishes full-corpus sitemap shards and IndexNow submissions for faster search indexing.
+arxiv.gg is not affiliated with or endorsed by arXiv. Metadata and files originate from arXiv; availability and coverage vary by record.
 
-## Current Production Shape
+## Architecture
 
-- Go web app and CLI.
-- PostgreSQL with pgvector in production.
-- SQLite fallback for local/offline use.
-- Python embedding service using sentence-transformers.
-- Docker Compose deployment with app and database health checks.
-- Cloudflare tunnel in front of `https://arxiv.gg`.
-- Public sitemap index covering 600k+ paper URLs.
+Production requires **PostgreSQL with pgvector**. PostgreSQL stores the paper catalog, search indexes, accounts, feedback, Qwen jobs, abstract vectors, paper chunks, and chunk vectors. The application runs GORM `AutoMigrate` and backend-specific schema initialization whenever it opens the database.
 
-## Quick Start
+The current semantic architecture is Qwen-only:
 
-Build the CLI:
+- Model: `Qwen/Qwen3-Embedding-8B`
+- Stored dimension: 1,024
+- Abstract vectors: `embeddings_v2`
+- Full-paper chunks and vectors: `paper_chunks` and `chunk_embeddings_v2`
+- Query and abstract work: leased `qwen_embedding_jobs`, serviced locally or by authenticated remote GPU workers
+- Similar-paper maps: Qwen abstract vectors projected into two dimensions for display
+
+MiniLM code and the original `embeddings` table remain for compatibility and migration work. They are not the current product semantic-search path. SQLite remains a legacy/test backend used by the Go test suite and limited maintenance workflows; it is not a supported production database and cannot provide the PostgreSQL/pgvector product architecture.
+
+See [Semantic Search](docs/SEMANTIC_SEARCH.md) and the [GPU Worker Runbook](docs/GPU_WORKER_RUNBOOK.md).
+
+## Prerequisites
+
+- Go 1.25, matching `go.mod`
+- PostgreSQL with the pgvector extension for a supported application deployment
+- Python 3 plus the worker dependencies for Qwen ingestion or serving
+- `pdftotext` from Poppler for PDF text extraction
+- Docker and Docker Compose for the documented production deployment
+- A CUDA-capable GPU for self-hosted Qwen inference; remote workers are also supported
+
+## Build And Run
+
+Build and test the Go application:
 
 ```bash
 go build -o bin/arxiv ./cmd/arxiv
+go test ./...
 ```
 
-Run a small local cache with SQLite:
+Set a PostgreSQL URL before opening the application:
 
 ```bash
 export ARXIV_CACHE="$HOME/.cache/arxiv"
+export DATABASE_URL='postgres://arxiv:password@127.0.0.1:5432/arxiv?sslmode=disable'
 ./bin/arxiv sync -set cs -from 2024-01-01
 ./bin/arxiv serve -port 8080
+curl -fsS http://127.0.0.1:8080/health
 ```
 
-Open `http://localhost:8080`.
+The health response must report `"db":"postgres"` for a supported deployment. `serve -local` enables local PDF/source downloads, bypasses production admin checks, and binds only to loopback; do not use it as an internet-facing mode.
 
-Fetch a specific paper:
+For SQLite-only tests, explicitly clear `DATABASE_URL`:
 
 ```bash
-./bin/arxiv fetch 1706.03762
-./bin/arxiv fetch -pdf 1706.03762
+env -u DATABASE_URL go test ./...
 ```
 
-Search locally:
+See [Setup](docs/SETUP.md) and [CLI](docs/CLI.md).
+
+## Search Interfaces
 
 ```bash
-./bin/arxiv search "attention mechanism"
-./bin/arxiv search -category cs.CL "language model"
+# Metadata full-text search
+curl --get 'http://127.0.0.1:8080/api/v1/search' \
+  --data-urlencode 'q=graph neural networks' \
+  --data 'limit=10'
+
+# Qwen idea search; inspect data.fallback before treating scores as semantic
+curl --get 'http://127.0.0.1:8080/api/v1/search/semantic' \
+  --data-urlencode 'q=robust reasoning under distribution shift' \
+  --data 'limit=10'
+
+# SSE search with quick, search, or deep mode
+curl -N --get 'http://127.0.0.1:8080/api/v1/search/stream' \
+  --data-urlencode 'q=mechanistic interpretability' \
+  --data 'mode=semantic'
 ```
 
-## Web App
+Quick Search is the default. Semantic Search uses Qwen only and is shown in the browser only when a synchronous service or monitored asynchronous worker is configured. If Qwen execution becomes unavailable during a request, the semantic endpoint returns HTTP 206 with Quick matches, structured fallback metadata, and retries only when an asynchronous worker is genuinely configured. Clients must not interpret fallback results as vector similarities. Deep Search requires a signed-in browser session or account API key and only covers papers with current prepared chunks.
 
-The web interface includes:
+See [API](docs/API.md) for endpoints, authentication, limits, and queued embedding responses.
 
-- Fast keyword search with live results.
-- Semantic search when embeddings are available.
-- Paper pages with abstracts, authors, categories, PDFs, source links, and export actions.
-- Citation graph visualization.
-- Author profiles with publication history and collaborators.
-- Category pages with canonical URLs, meta descriptions, and structured data.
-- `/health` for container and uptime monitoring.
+## Accounts And Feedback
 
-## REST API
+Accounts are optional and currently use Google OAuth when configured. The application stores the account profile, sessions, signed-in paper-view counts/timestamps, a hashed API key, and feedback activity. It does not currently provide saved searches, alerts, billing, or a guaranteed private reading mode. Public paper and search routes generally work without an account; Deep Search and account-specific MCP behavior require authentication.
 
-All API routes live under `/api/v1`.
+The dedicated `/feedback` page explains how community ideas inform product decisions and advertises a conditional `$100` suggestion offer. A post alone does not earn an award. Eligibility requires a qualifying suggestion that arxiv.gg selects, actually ships, and accepts as meeting the offer; the submitter must be contactable and legally/payment-eligible. Acceptance and payment remain discretionary, and no award is guaranteed for every post, vote leader, similar idea, partial implementation, or feature independently planned or shipped. Anonymous display does not make the submission anonymous to operators because the account remains associated in the database.
 
-Examples:
+## Production Deployment
 
-```bash
-curl https://arxiv.gg/api/v1/stats
-curl https://arxiv.gg/api/v1/papers/1706.03762
-curl "https://arxiv.gg/api/v1/search?q=transformer&limit=10"
-curl "https://arxiv.gg/api/v1/search/semantic?q=attention+mechanisms&limit=10"
-curl https://arxiv.gg/api/v1/papers/1706.03762/export/bibtex
-```
+Copy `.env.example` to `.env`, set the non-secret deployment values, and create the root-readable secret directory named by `ARXIV_SECRETS_DIR`. The Compose deployment expects files named `postgres-password`, `database-url`, `admin-token`, `qwen-worker-token`, and `google-client-secret`; it does not put these values directly in `.env`.
 
-See [docs/API.md](docs/API.md) for endpoint details.
-
-## Semantic Search
-
-Embeddings are generated from paper title and abstract text.
-
-Local batch generation:
-
-```bash
-pip3 install -r tools/requirements.txt
-python3 tools/generate_embeddings.py "$ARXIV_CACHE" --limit 1000
-```
-
-CLI generation:
-
-```bash
-./bin/arxiv reindex --embeddings --limit 1000
-./bin/arxiv fetch --with-embedding 2301.00001
-```
-
-Production uses PostgreSQL and pgvector; local development can fall back to SQLite.
-
-## SEO And Indexing
-
-arxiv.gg is built for crawlable research pages:
-
-- Self-referencing canonical URLs.
-- Paper `ScholarlyArticle` JSON-LD.
-- Author `ProfilePage` JSON-LD.
-- Category `CollectionPage` and `ItemList` JSON-LD.
-- Full sitemap index at `https://arxiv.gg/sitemap.xml`.
-- Paper sitemap shards at `/sitemaps/papers-N.xml`.
-- Public IndexNow key file.
-
-Submit changed URLs to IndexNow:
-
-```bash
-python3 tools/submit_indexnow.py --url https://arxiv.gg/category/cs.LG
-python3 tools/submit_indexnow.py --file changed-urls.txt
-python3 tools/submit_indexnow.py --sitemap https://arxiv.gg/sitemap.xml --limit 1000
-```
-
-See [docs/SEO_INDEXING_REPORT_2026-05-16.md](docs/SEO_INDEXING_REPORT_2026-05-16.md) for the current indexing plan.
-
-## Production Deploy
-
-Production is managed with Docker Compose. The important rule: preserve the existing Postgres volume because it contains the paper cache and embeddings.
-
-App-only redeploy:
-
-```bash
-docker compose build arxiv
-docker compose up -d --no-deps arxiv
-curl -fsS http://127.0.0.1/health
-```
-
-Do not recreate the database volume during routine app deploys.
-
-Required environment:
-
-```bash
-DATABASE_URL=postgres://...
-ADMIN_TOKEN=...
+```dotenv
+ARXIV_SECRETS_DIR=/etc/arxiv/secrets
 ADMIN_EMAILS=you@example.com
-POSTGRES_PASSWORD=...
-TRUST_PROXY_HEADERS=true
+TRUST_PROXY_HEADERS=false
 INDEXNOW_KEY=...
 ```
 
-See [docs/DEPLOYMENT_RUNBOOK_2026-05-15.md](docs/DEPLOYMENT_RUNBOOK_2026-05-15.md) for the full safe-deploy flow.
+Set `TRUST_PROXY_HEADERS=true` only when a trusted reverse proxy is the sole ingress and overwrites client-supplied forwarding headers. Preserve the external `arxiv_postgres_data` volume. Build a clean, commit-addressed image, back up the schema, retain the exact running image for rollback, and replace only the application container.
 
-## Repository Map
+After deployment, verify:
 
-```text
-cmd/arxiv/              Web server, CLI entrypoint, templates, API handlers
-tools/                  Embedding service, embedding jobs, IndexNow submitter
-docs/                   API, deployment, SEO, performance, and infra reports
-cache.go                Cache/database initialization
-search.go               Keyword/category/author search
-search_embeddings.go    Semantic search
-citations.go            Citation graph and reference lookup
-export_sitemap.go       Sitemap index and sitemap shard generation
-docker-compose.yml      Production compose services
+```bash
+curl -fsS http://127.0.0.1/health
+APP_CONTAINER="$(docker compose ps -q arxiv)"
+docker inspect -f '{{.Config.Image}}' "$APP_CONTAINER"
+docker logs --since 5m "$APP_CONTAINER"
 ```
 
-## Development
+The health response must identify PostgreSQL and the inspected image must be the intended immutable release. Follow the complete [Production Deployment Runbook](docs/DEPLOYMENT_RUNBOOK_2026-05-15.md); container rollback does not reverse schema changes.
 
-Run tests:
+## Repository Guide
+
+- `cmd/arxiv/` — CLI, HTTP server, templates, REST, SSE, MCP, auth, admin, and feedback handlers
+- Root Go package — cache, synchronization, downloads, search, citations, exports, accounts, feedback, and Qwen queues
+- `tools/` — Qwen services, workers, backfills, full-paper preparation, checks, and legacy MiniLM utilities
+- `deploy/` — SQL and systemd assets
+- `docs/` — active technical documentation and clearly marked historical snapshots
+- `cmd/migrate/` — SQLite-to-PostgreSQL migration command
+
+## Validation
 
 ```bash
 go test ./...
-python3 -m py_compile tools/submit_indexnow.py
+go test -race ./...
+go vet ./...
+git diff --check
 ```
 
-Format Go changes:
-
-```bash
-gofmt -w .
-```
-
-Check production health:
-
-```bash
-curl -fsS https://arxiv.gg/health
-curl -fsS https://arxiv.gg/sitemap.xml
-```
+These commands do not validate production PostgreSQL migrations, pgvector indexes, OAuth, proxy behavior, GPU workers, or distributed queue failures. Use [Testing](docs/TESTING.md) for the required integration checks.
 
 ## License
 

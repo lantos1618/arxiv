@@ -1,405 +1,161 @@
-# arXiv Cache API Documentation
+# arxiv.gg API
 
-## REST API Endpoints
+The JSON API is rooted at `/api/v1/`; MCP uses `/mcp`. Successful JSON endpoints generally return `{"success":true,"data":...}` and failures return `{"success":false,"error":"..."}`. Public internal failures are redacted; inspect server logs for operational detail.
 
-All API endpoints are prefixed with `/api/v1/`. Responses are JSON with the following structure:
+## Authentication
 
-```json
-{
-  "success": true,
-  "data": { ... },
-  "error": "..."
-}
-```
+- Public reads need no credential unless noted.
+- Account API keys use `Authorization: Bearer arxivgg_...` and are created/regenerated from `/account` after Google sign-in.
+- Admin API operations accept an admin Google session, `X-Admin-Token`, or `Authorization: Bearer <ADMIN_TOKEN>`.
+- Remote Qwen workers use `X-Qwen-Worker-Token` or bearer `QWEN_WORKER_TOKEN`; an admin credential is also accepted.
+- Query-string admin secrets are not accepted.
+- In `serve -local`, privileged checks are bypassed and the server binds to loopback.
 
-### Papers
+Cookie-authenticated mutations require a same-origin request. Use headers, not cookies, for agents and remote workers.
 
-#### Get Paper
-```
-GET /api/v1/papers/{id}
-```
+## Paper Endpoints
 
-Returns paper metadata, citation count, and references.
+| Method | Path | Purpose | Access |
+|---|---|---|---|
+| `GET` | `/api/v1/papers/{id}` | Paper metadata, reference list, cited-by count | Public |
+| `GET` | `/api/v1/papers/{id}/citations` | Extracted references | Public |
+| `GET` | `/api/v1/papers/{id}/cited-by?limit=50` | Citing papers; max 200 | Public |
+| `GET` | `/api/v1/papers/{id}/graph` | Citation graph | Public |
+| `GET` | `/api/v1/papers/{id}/similar?limit=80` | Qwen neighbors and semantic map; max 160 | Public |
+| `GET` | `/api/v1/papers/{id}/embedding-status` | Qwen abstract/map readiness and job state | Public |
+| `POST` | `/api/v1/papers/{id}/fetch` | Fetch metadata/source/PDF | Admin |
+| `POST` | `/api/v1/papers/{id}/embeddings` | Generate or queue Qwen paper work | Public, separately rate-limited |
+| `GET` | `/api/v1/papers/{id}/export/{format}` | `bibtex`, `ris`, or `json` export | Public |
 
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/papers/2301.00001
-```
+Fetch query options are `pdf=true`, `source=false` (source defaults true), and `embedding=true`. Fetch is a privileged production mutation even when the paper is already public on arXiv.
 
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "paper": {
-      "id": "2301.00001",
-      "title": "...",
-      "authors": "...",
-      "abstract": "...",
-      ...
-    },
-    "citedByCount": 42,
-    "references": [...]
-  }
-}
-```
+`POST /papers/{id}/embeddings` may return HTTP 200 when work finishes synchronously or HTTP 202 when queued:
 
-#### Get Citations
-```
-GET /api/v1/papers/{id}/citations
-```
-
-Returns papers that this paper cites.
-
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/papers/2301.00001/citations
-```
-
-#### Get Cited By
-```
-GET /api/v1/papers/{id}/cited-by?limit=50
-```
-
-Returns papers that cite this paper.
-
-**Query Parameters:**
-- `limit` (optional): Maximum number of results (default: 50)
-
-#### Get Citation Graph
-```
-GET /api/v1/papers/{id}/graph
-```
-
-Returns citation graph data for visualization (nodes and edges).
-
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/papers/2301.00001/graph
-```
-
-#### Fetch Paper
-```
-POST /api/v1/papers/{id}/fetch?pdf=true&source=true&embedding=true
-```
-
-Fetches and downloads a paper from arXiv.
-
-**Query Parameters:**
-- `pdf` (optional): Download PDF (default: false)
-- `source` (optional): Download source (default: true)
-- `embedding` (optional): Generate embedding after fetch (default: false)
-
-**Example:**
-```bash
-curl -X POST "http://localhost:8080/api/v1/papers/2301.00001/fetch?source=true&embedding=true"
-```
-
-#### Export Paper
-```
-GET /api/v1/papers/{id}/export/{format}
-```
-
-Exports paper in various formats.
-
-**Formats:**
-- `bibtex` - BibTeX format (.bib)
-- `ris` - RIS format (.ris)
-- `json` - JSON format (.json)
-
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/papers/2301.00001/export/bibtex
-```
-
-### Search
-
-#### Search Papers (Keyword)
-```
-GET /api/v1/search?q={query}&category={category}&limit={limit}
-```
-
-Searches papers by title and abstract using SQLite FTS5.
-
-**Query Parameters:**
-- `q` (required): Search query
-- `category` (optional): Filter by category (e.g., "cs.AI")
-- `limit` (optional): Maximum results (default: 20)
-
-**Example:**
-```bash
-curl "http://localhost:8080/api/v1/search?q=transformer&category=cs.CL&limit=10"
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "papers": [...],
-    "count": 10
-  }
-}
-```
-
-#### Search Papers (Streaming) ⚡ NEW
-```
-GET /api/v1/search/stream?q={query}&category={category}&limit={limit}
-```
-
-Streams search results via Server-Sent Events (SSE) for real-time UI updates.
-
-**Headers:**
-- `Accept: text/event-stream`
-
-**Query Parameters:**
-- `q` (required): Search query
-- `category` (optional): Filter by category
-- `limit` (optional): Maximum results (default: 20)
-
-**SSE Events:**
-```
-data: {"type":"start","query":"transformer","total":150}
-
-data: {"type":"result","paper":{"id":"1706.03762","title":"..."}}
-
-data: {"type":"progress","current":10,"total":150}
-
-data: {"type":"complete","count":20}
-```
-
-**Example (JavaScript):**
-```javascript
-const evtSource = new EventSource('/api/v1/search/stream?q=transformer');
-evtSource.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  if (data.type === 'result') {
-    // Append paper to results
-    appendPaper(data.paper);
-  }
-};
-```
-
-#### Semantic Search ⚡ NEW
-```
-GET /api/v1/search/semantic?q={query}&limit={limit}
-```
-
-Searches papers using vector similarity. Finds papers by concept, not just keywords.
-
-**Query Parameters:**
-- `q` (required): Search query (natural language)
-- `limit` (optional): Maximum results (default: 20)
-
-**Note:** Requires embeddings to be generated first (see Embeddings section below).
-
-**Example:**
-```bash
-curl "http://localhost:8080/api/v1/search/semantic?q=attention+mechanisms+in+neural+networks&limit=10"
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "results": [
-      {
-        "paperId": "1706.03762",
-        "paper": {...},
-        "similarity": 0.92
-      }
-    ],
-    "count": 10,
-    "query": "attention mechanisms in neural networks"
-  }
-}
-```
-
-#### Search PDF Content
-```
-GET /api/v1/search/pdf?q={query}&limit={limit}&fuzzy={boolean}
-```
-
-Searches within downloaded PDF content using fuzzy matching.
-
-**Query Parameters:**
-- `q` (required): Search query
-- `limit` (optional): Maximum results (default: 50)
-- `fuzzy` (optional): Enable fuzzy matching (default: false)
-
-### Embeddings ⚡ NEW
-
-Embeddings enable semantic search by converting paper titles and abstracts into 384-dimensional vectors.
-
-#### Generate Paper Embedding
-```
-POST /api/v1/papers/{id}/embeddings
-```
-
-Generates an embedding for a single paper.
-
-**Example:**
-```bash
-curl -X POST "http://localhost:8080/api/v1/papers/1706.03762/embeddings"
-```
-
-**Response:**
 ```json
 {
   "success": true,
   "data": {
     "paperId": "1706.03762",
-    "message": "embedding generated successfully"
+    "hasEmbedding": false,
+    "mapReady": false,
+    "queued": true,
+    "status": {},
+    "statusUrl": "/api/v1/papers/1706.03762/embedding-status",
+    "message": "Qwen worker is not warm; embedding work queued."
   }
 }
 ```
 
-#### Generate All Embeddings
-```
-POST /api/v1/embeddings/generate?limit={limit}
-```
+Poll `statusUrl`. Do not treat HTTP 202 or `queued:true` as completion.
 
-Generates embeddings for all papers in the cache.
+## Search Endpoints
 
-**Query Parameters:**
-- `limit` (optional): Process only N papers
+| Method | Path | Parameters | Notes |
+|---|---|---|---|
+| `GET` | `/api/v1/search` | `q`, `category`, `limit` (default 20, max 100) | Metadata full-text search |
+| `GET` | `/api/v1/search/quick` | `q`, `limit` (default 10, max 50) | Fast paper/author suggestions |
+| `GET` | `/api/v1/search/semantic` | `q`, `limit` (default 20, max 100) | Qwen abstract search with explicit Quick fallback |
+| `GET` | `/api/v1/search/pdf` | `q`, `limit` (max 50), `fuzzy=true` | Signed-in/API-key Deep Search over available extracted PDF text; rate and concurrency limited |
+| `GET` | `/api/v1/search/stream` | `q`, `category`, `limit`, `mode` | SSE modes `quick`, `search`, and `deep` |
 
-**Headers:**
-- `Accept: text/event-stream` - Get real-time progress via SSE
+Semantic success identifies `mode:"semantic"` and `model:"Qwen/Qwen3-Embedding-8B"`. When the Qwen catalog or execution path is unavailable, the same endpoint returns HTTP 206 Quick matches with `mode:"quick"`, `requestedMode:"semantic"`, structured fallback metadata, and no retry recommendation. A retry is recommended only when a monitored asynchronous worker is configured and the query was queued.
 
-**Standard Response:**
 ```json
 {
   "success": true,
   "data": {
-    "count": 1000,
-    "message": "embeddings generated successfully"
+    "results": [{"paperId":"...","paper":{},"similarity":null,"fallback":true}],
+    "papers": [],
+    "count": 1,
+    "query": "...",
+    "mode": "quick",
+    "model": "quick",
+    "fallback": true,
+    "notice": "Idea search is unavailable; showing Quick matches."
   }
 }
 ```
 
-**SSE Events (with Accept: text/event-stream):**
-```
-data: {"type":"start","message":"Starting embedding generation..."}
+Always inspect `data.fallback` before consuming similarity scores.
 
-data: {"type":"progress","current":100,"total":1000,"message":"Processed 100/1000 papers (10%)"}
-
-data: {"type":"complete","count":1000,"message":"Embedding generation completed successfully"}
-```
-
-**CLI Alternative:**
-```bash
-# Generate embeddings for all papers
-arxiv reindex --embeddings
-
-# Generate with limit
-arxiv reindex --embeddings --limit 1000
-
-# Auto-generate when fetching
-arxiv fetch --with-embedding 2301.00001
-
-# Use Python script directly
-python3 tools/generate_embeddings.py ~/.cache/arxiv --limit 1000
-```
-
-### Categories
-
-#### List Categories
-```
-GET /api/v1/categories
-```
-
-Returns all categories with paper counts.
-
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/categories
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": [
-    {"name": "cs.AI", "count": 1234},
-    {"name": "cs.CL", "count": 567},
-    ...
-  ]
-}
-```
-
-### Statistics
-
-#### Get Cache Statistics
-```
-GET /api/v1/stats
-```
-
-Returns cache statistics.
-
-**Example:**
-```bash
-curl http://localhost:8080/api/v1/stats
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "totalPapers": 10000,
-    "pdfsDownloaded": 5000,
-    "sourcesDownloaded": 8000,
-    "queuedDownloads": 0
-  }
-}
-```
-
-## Rate Limiting
-
-API requests are rate-limited to 100 requests per minute per IP address. When rate limit is exceeded, the API returns HTTP 429 (Too Many Requests).
-
-## Caching
-
-API responses are cached for 5 minutes. Use `If-None-Match` header with ETag for conditional requests:
+The SSE endpoint emits `start`, `status`, `fallback`, `result`, `error`, and `complete` events as JSON in `data:` lines. `mode=semantic` uses Qwen abstract search; `mode=deep` uses prepared Qwen full-paper chunks and requires an authenticated session or account API key. Omitted mode defaults to Quick. The legacy `search` alias remains accepted, but clients should use `quick`, `semantic`, or `deep`.
 
 ```bash
-curl -H "If-None-Match: \"abc123\"" http://localhost:8080/api/v1/papers/2301.00001
+curl -N --get 'https://arxiv.gg/api/v1/search/stream' \
+  --data-urlencode 'q=robust control' \
+  --data 'mode=semantic&limit=20'
 ```
 
-If the resource hasn't changed, you'll get HTTP 304 (Not Modified).
+## Catalog And Author Endpoints
 
-## Web Export Endpoints
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/categories` | Category list |
+| `GET` | `/api/v1/stats` | Catalog/download/Qwen/SSE coverage signals |
+| `GET` | `/api/v1/authors/profile?author=...` | Author profile |
+| `GET` | `/api/v1/authors/collaborators?author=...&limit=100` | Collaborators; max 200 |
+| `GET` | `/api/v1/authors/similar?author=...&limit=10` | Similar authors; max 50 |
+| `GET` | `/api/v1/authors/stats?author=...` | Author statistics |
+| `GET` | `/api/v1/authors/graph?author=...&depth=1` | Collaboration graph; depth 1 or 2 |
+| `POST` | `/api/v1/authors/build-graph` | Rebuild author graph/embeddings; admin only |
+| `GET` | `/api/v1/papers/recent/stream` | SSE stream of newly fetched papers |
 
-Papers can also be exported via web interface:
+## Pipeline Status And Retired Endpoint
 
-- `/paper/{id}/export/bibtex` - BibTeX export
-- `/paper/{id}/export/ris` - RIS export
-- `/paper/{id}/export/json` - JSON export
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/embeddings/generate` | Retired MiniLM bulk route; authenticated calls return HTTP 410 |
+| `GET` | `/api/v1/embeddings/status` | Current Qwen model, dimension, service state, and coverage |
 
-## Examples
+The retired POST route exists only to give old clients an explicit migration response. Generate or queue a canonical profile with `POST /api/v1/papers/{id}/embeddings`.
 
-### Fetch and export a paper
-```bash
-# Fetch paper
-curl -X POST "http://localhost:8080/api/v1/papers/2301.00001/fetch?source=true"
+## Qwen Worker API
 
-# Export as BibTeX
-curl http://localhost:8080/api/v1/papers/2301.00001/export/bibtex > paper.bib
+Remote workers use:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/qwen/jobs/claim` | Claim up to 8 `query`/`abstract` jobs |
+| `POST` | `/api/v1/qwen/jobs/{leased-id}/heartbeat` | Renew an active fenced lease |
+| `POST` | `/api/v1/qwen/jobs/{leased-id}/complete` | Store a vector for the active lease/source hash |
+| `POST` | `/api/v1/qwen/jobs/{leased-id}/fail` | Record failure for the active lease |
+
+Claim bodies include `kinds`, `limit`, `leaseOwner`, and `leaseSeconds` (maximum 3,600). Completion, failure, and heartbeat must return the claimed lease owner/generation; completion also validates source hash. A stale or ambiguous worker must retry/query safely and must not overwrite a reclaimed job.
+
+Use `tools/qwen_api_worker.py` rather than implementing this protocol ad hoc.
+
+## MCP
+
+`/mcp` implements Streamable HTTP JSON-RPC with protocol version `2025-06-18`. `GET /mcp` returns discovery metadata; `POST /mcp` handles `initialize`, `ping`, `tools/list`, and `tools/call`.
+
+Tools currently exposed are:
+
+- `arxiv_api_overview`
+- `arxiv_account`
+- `arxiv_search`
+- `arxiv_get_paper`
+- `arxiv_related_papers`
+
+Public search/paper tools work without an account. Deep Search and account details require an authenticated cookie or bearer account API key.
+
+Example Codex configuration:
+
+```toml
+[mcp_servers.arxiv_gg]
+url = "https://arxiv.gg/mcp"
+http_headers = { Authorization = "Bearer arxivgg_..." }
 ```
 
-### Search and get details
-```bash
-# Search
-curl "http://localhost:8080/api/v1/search?q=attention&limit=5"
+Requests are capped at 256 KiB. Batches contain at most 20 requests and a maximum aggregate cost of 24. Empty batches and requests without JSON-RPC `2.0` are rejected.
 
-# Get details for first result
-curl http://localhost:8080/api/v1/papers/1706.03762
-```
+## Limits And Caching
 
-### Get citation graph
-```bash
-curl http://localhost:8080/api/v1/papers/2301.00001/graph | jq '.data.nodes | length'
-```
+- Global HTTP limit: 1,000 requests per minute per client IP.
+- Public single-paper embedding requests: 6 per minute per client IP.
+- Login: 12 attempts per 10 minutes per client IP.
+- Feedback mutations: 30 per minute per client IP, plus per-account post limits.
+- Limit violations return HTTP 429.
 
+Client IP comes from the socket unless `TRUST_PROXY_HEADERS=true` and the direct peer is loopback or a private-network proxy. Enable header trust only behind a sanitizing trusted proxy.
+
+Selected successful GET responses are cached with ETags. Query-bearing, authenticated, personalized, SSE, mutation, and error responses are not treated as interchangeable public cache entries. Clients should still honor response `Cache-Control` and `Vary` headers.

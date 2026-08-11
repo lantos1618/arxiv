@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lantos1618/arxiv.gg"
@@ -16,83 +17,106 @@ import (
 
 func main() {
 	log.SetFlags(0)
-
-	if len(os.Args) < 2 {
-		usage()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := runCLI(ctx, os.Args[1:]); err != nil {
+		log.Print(err)
 		os.Exit(1)
 	}
+}
 
-	// Default cache location
-	cacheDir := os.Getenv("ARXIV_CACHE")
-	if cacheDir == "" {
-		home, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(home, ".cache", "arxiv")
+func runCLI(ctx context.Context, argv []string) error {
+	if len(argv) == 0 {
+		usage()
+		return fmt.Errorf("command required")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
+	cacheDir, err := cacheDirectory(os.Getenv("ARXIV_CACHE"), os.UserHomeDir)
+	if err != nil {
+		return err
+	}
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
+	cmd := argv[0]
+	args := argv[1:]
 
 	switch cmd {
 	case "fetch":
-		cmdFetch(ctx, cacheDir, args)
+		return cmdFetch(ctx, cacheDir, args)
 	case "sync":
-		cmdSync(ctx, cacheDir, args)
+		return cmdSync(ctx, cacheDir, args)
 	case "stats":
-		cmdStats(ctx, cacheDir, args)
+		return cmdStats(ctx, cacheDir, args)
 	case "search":
-		cmdSearch(ctx, cacheDir, args)
+		return cmdSearch(ctx, cacheDir, args)
 	case "get":
-		cmdGet(ctx, cacheDir, args)
+		return cmdGet(ctx, cacheDir, args)
 	case "list", "ls":
-		cmdList(ctx, cacheDir, args)
+		return cmdList(ctx, cacheDir, args)
 	case "reindex":
-		cmdReindex(ctx, cacheDir, args)
+		return cmdReindex(ctx, cacheDir, args)
 	case "serve":
 		cmdServe(ctx, cacheDir, args)
+		return nil
 	case "help":
 		usage()
+		return nil
 	default:
-		log.Fatalf("unknown command: %s", cmd)
+		return fmt.Errorf("unknown command: %s", cmd)
 	}
+}
+
+func cacheDirectory(configured string, userHomeDir func() (string, error)) (string, error) {
+	if strings.TrimSpace(configured) != "" {
+		return configured, nil
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory (set ARXIV_CACHE to override): %w", err)
+	}
+	if strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("determine home directory: empty path (set ARXIV_CACHE to override)")
+	}
+	return filepath.Join(home, ".cache", "arxiv"), nil
 }
 
 func usage() {
 	fmt.Print(usageText)
 }
 
-func cmdFetch(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
+func cmdFetch(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
 	pdf := fs.Bool("pdf", false, "Download PDF")
-	source := fs.Bool("source", true, "Download TeX source (default)")
+	source := fs.Bool("source", false, "Download TeX source")
 	all := fs.Bool("all", false, "Download both PDF and source")
-	withEmbedding := fs.Bool("with-embedding", false, "Generate embedding for semantic search (requires Python dependencies)")
-	fs.Parse(args)
+	withEmbedding := fs.Bool("with-embedding", false, "Queue the canonical Qwen paper profile")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		log.Fatal("usage: arxiv fetch [options] <paper-id> [paper-id...]")
+		return fmt.Errorf("usage: arxiv fetch [options] <paper-id> [paper-id...]")
 	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
+	downloadPDF, downloadSource := fetchDownloadSelection(*pdf, *source, *all)
 	opts := &arxiv.DownloadOptions{
-		DownloadPDF:       *pdf || *all,
-		DownloadSource:    *source || *all,
-		GenerateEmbedding: *withEmbedding,
+		DownloadPDF:    downloadPDF,
+		DownloadSource: downloadSource,
 	}
 
+	var failures []string
 	for _, id := range fs.Args() {
 		fmt.Printf("Fetching %s...\n", id)
 
 		paper, err := cache.FetchAndDownload(ctx, id, opts)
 		if err != nil {
 			log.Printf("  error: %v", err)
+			failures = append(failures, id)
 			continue
 		}
 
@@ -112,28 +136,58 @@ func cmdFetch(ctx context.Context, cacheDir string, args []string) {
 				fmt.Printf("  PDF text: %d chars\n", len(text))
 			}
 		}
-		if opts.GenerateEmbedding {
-			fmt.Printf("  Embedding: Generating in background...\n")
+		if *withEmbedding {
+			fmt.Printf("  Qwen profile: queueing...\n")
+			status, err := cache.EnsureQwenPaperJobs(ctx, id, 100)
+			if err != nil {
+				log.Printf("  embedding error: %v", err)
+				failures = append(failures, id)
+				continue
+			}
+			fmt.Printf("  Qwen profile: %d queued, %d running\n", status.QueuedJobs, status.RunningJobs)
 		}
 		fmt.Println()
 
 		// Rate limit between papers
 		if len(fs.Args()) > 1 {
-			time.Sleep(3 * time.Second)
+			timer := time.NewTimer(3 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
+	return fetchFailureError(failures)
 }
 
-func cmdSync(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+func fetchDownloadSelection(pdf, source, all bool) (downloadPDF, downloadSource bool) {
+	return pdf || all, source || all || (!pdf && !all)
+}
+
+func fetchFailureError(paperIDs []string) error {
+	if len(paperIDs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("fetch failed for %d paper(s): %s", len(paperIDs), strings.Join(paperIDs, ", "))
+}
+
+func cmdSync(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	set := fs.String("set", "", "arXiv set to sync (e.g., cs, physics)")
 	from := fs.String("from", "", "Start date (YYYY-MM-DD)")
 	batchSize := fs.Int("batch", 1000, "Metadata records to insert per database batch")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *batchSize <= 0 {
+		return fmt.Errorf("batch size must be greater than zero")
+	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
@@ -152,30 +206,34 @@ func cmdSync(ctx context.Context, cacheDir string, args []string) {
 	if *from != "" {
 		opts.From, err = time.Parse("2006-01-02", *from)
 		if err != nil {
-			log.Fatalf("invalid date: %v", err)
+			return fmt.Errorf("invalid date: %w", err)
 		}
 	}
 
-	fmt.Println("Starting metadata sync (this downloads ~2.4M paper metadata)...")
+	fmt.Println("Starting metadata sync; record count depends on the selected set, date range, and resume state.")
 	fmt.Printf("Database batch size: %d\n", *batchSize)
 	fmt.Println("Press Ctrl+C to stop; sync will resume from where it left off.")
 	if err := cache.SyncMetadata(ctx, opts); err != nil {
-		log.Fatalf("sync: %v", err)
+		return fmt.Errorf("sync: %w", err)
 	}
 	fmt.Println()
 	fmt.Println("Sync complete!")
+	return nil
 }
 
-func cmdStats(ctx context.Context, cacheDir string, args []string) {
+func cmdStats(ctx context.Context, cacheDir string, args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: arxiv stats")
+	}
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
 	stats, err := cache.Stats(ctx)
 	if err != nil {
-		log.Fatalf("stats: %v", err)
+		return fmt.Errorf("stats: %w", err)
 	}
 
 	fmt.Printf("Cache: %s\n", cacheDir)
@@ -183,33 +241,36 @@ func cmdStats(ctx context.Context, cacheDir string, args []string) {
 	fmt.Printf("PDFs downloaded:    %d\n", stats.PDFsDownloaded)
 	fmt.Printf("Sources downloaded: %d\n", stats.SourcesDownloaded)
 	fmt.Printf("Queued downloads:   %d\n", stats.QueuedDownloads)
+	return nil
 }
 
-func cmdSearch(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("search", flag.ExitOnError)
+func cmdSearch(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	category := fs.String("category", "", "Filter by category")
 	limit := fs.Int("limit", 20, "Max results")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		log.Fatal("usage: arxiv search <query>")
+		return fmt.Errorf("usage: arxiv search [options] <query>")
 	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
-	query := fs.Arg(0)
+	query := strings.Join(fs.Args(), " ")
 	results, err := cache.Search(ctx, query, *category, *limit)
 	if err != nil {
-		log.Fatalf("search: %v", err)
+		return fmt.Errorf("search: %w", err)
 	}
 
 	if len(results) == 0 {
 		fmt.Println("No results found.")
-		return
+		return nil
 	}
 
 	for _, p := range results {
@@ -225,20 +286,26 @@ func cmdSearch(ctx context.Context, cacheDir string, args []string) {
 		fmt.Println()
 		fmt.Println()
 	}
+	return nil
 }
 
-func cmdGet(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("get", flag.ExitOnError)
+func cmdGet(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	fetch := fs.Bool("fetch", false, "Fetch from arXiv if not cached")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		log.Fatal("usage: arxiv get [-fetch] <paper-id>")
+		return fmt.Errorf("usage: arxiv get [-fetch] <paper-id>")
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("get accepts exactly one paper ID")
 	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
@@ -249,7 +316,7 @@ func cmdGet(ctx context.Context, cacheDir string, args []string) {
 		paper, err = cache.GetPaper(ctx, fs.Arg(0))
 	}
 	if err != nil {
-		log.Fatalf("get paper: %v", err)
+		return fmt.Errorf("get paper: %w", err)
 	}
 
 	fmt.Printf("ID:         %s\n", paper.ID)
@@ -267,19 +334,25 @@ func cmdGet(ctx context.Context, cacheDir string, args []string) {
 		fmt.Printf("Source Path: %s\n", paper.SourcePath)
 	}
 	fmt.Printf("\nAbstract:\n%s\n", paper.Abstract)
+	return nil
 }
 
-func cmdList(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
+func cmdList(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	category := fs.String("cat", "", "Filter by category (e.g., cs.AI)")
 	limit := fs.Int("n", 0, "Max results (0 = all)")
 	srcOnly := fs.Bool("src", false, "Only papers with source downloaded")
 	all := fs.Bool("a", false, "Show all (including metadata-only)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return fmt.Errorf("list accepts at most one category")
+	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
@@ -290,12 +363,12 @@ func cmdList(ctx context.Context, cacheDir string, args []string) {
 
 	papers, err := cache.ListPapersFiltered(ctx, *category, *srcOnly, *all, *limit)
 	if err != nil {
-		log.Fatalf("list: %v", err)
+		return fmt.Errorf("list: %w", err)
 	}
 
 	if len(papers) == 0 {
 		fmt.Println("No papers cached.")
-		return
+		return nil
 	}
 
 	for _, p := range papers {
@@ -309,46 +382,58 @@ func cmdList(ctx context.Context, cacheDir string, args []string) {
 		fmt.Printf("%s\t%s\t%s\n", p.ID, p.Title, status)
 	}
 	fmt.Fprintf(os.Stderr, "\n%d papers\n", len(papers))
+	return nil
 }
 
-func cmdReindex(ctx context.Context, cacheDir string, args []string) {
-	fs := flag.NewFlagSet("reindex", flag.ExitOnError)
-	embeddings := fs.Bool("embeddings", false, "Generate embeddings for semantic search (requires Python dependencies)")
-	limit := fs.Int("limit", 0, "Limit number of papers to generate embeddings for (0 = all)")
-	fs.Parse(args)
+func cmdReindex(ctx context.Context, cacheDir string, args []string) error {
+	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+	embeddings := fs.Bool("embeddings", false, "Deprecated: legacy MiniLM generation has been retired")
+	_ = fs.Int("limit", 0, "Deprecated with -embeddings")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("reindex does not accept positional arguments")
+	}
+	if *embeddings {
+		return fmt.Errorf("-embeddings has been retired; use the Qwen worker pipeline documented in docs/SEMANTIC_SEARCH.md")
+	}
 
 	cache, err := arxiv.Open(cacheDir)
 	if err != nil {
-		log.Fatalf("open cache: %v", err)
+		return fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close()
 
 	fmt.Println("Rebuilding FTS index...")
 	if err := cache.RebuildFTSIndex(ctx); err != nil {
-		log.Fatalf("reindex fts: %v", err)
+		return fmt.Errorf("reindex fts: %w", err)
 	}
 
 	fmt.Println("Rebuilding citations...")
 	if err := cache.RebuildAllCitations(ctx); err != nil {
-		log.Fatalf("reindex citations: %v", err)
-	}
-
-	if *embeddings {
-		fmt.Println("Generating embeddings...")
-		// Use the Python script for batch embedding generation
-		// It's already optimized and handles batching
-		args := []string{"tools/generate_embeddings.py", cacheDir}
-		if *limit > 0 {
-			args = append(args, "--limit", fmt.Sprintf("%d", *limit))
-		}
-
-		cmd := exec.Command("python3", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			log.Fatalf("generate embeddings: %v", err)
-		}
+		return fmt.Errorf("reindex citations: %w", err)
 	}
 
 	fmt.Println("Done.")
+	return nil
+}
+
+func findTool(name string) (string, error) {
+	candidates := []string{filepath.Join("/app/tools", name), filepath.Join("tools", name)}
+	if executable, err := os.Executable(); err == nil {
+		dir := filepath.Dir(executable)
+		candidates = append(candidates, filepath.Join(dir, "tools", name), filepath.Join(dir, "..", "tools", name))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			path, absErr := filepath.Abs(candidate)
+			if absErr != nil {
+				return "", fmt.Errorf("resolve tool path %q: %w", candidate, absErr)
+			}
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("tool %q not found; run from the repository root or install it under /app/tools", name)
 }

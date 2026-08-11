@@ -79,12 +79,18 @@ func (c *Cache) QuickSearch(ctx context.Context, query string, limit int) ([]Pap
 }
 
 func (c *Cache) quickSearchPostgres(ctx context.Context, query string, limit int) ([]Paper, int, error) {
-	if papers, ok, err := c.quickSearchPostgresID(ctx, query, limit); ok || err != nil {
-		return papers, len(papers), err
+	if papers, total, ok, err := c.quickSearchPostgresID(ctx, query, limit); ok || err != nil {
+		return papers, total, err
 	}
-	if looksLikeAuthorSearchQuery(query) && c.CountPapersByAuthor(ctx, query) > 0 {
-		papers, err := c.SearchByAuthor(ctx, query, limit)
-		return papers, len(papers), err
+	if looksLikeAuthorSearchQuery(query) {
+		total, err := c.CountPapersByAuthorResult(ctx, query)
+		if err != nil {
+			return nil, 0, fmt.Errorf("count author search results: %w", err)
+		}
+		if total > 0 {
+			papers, err := c.SearchByAuthor(ctx, query, limit)
+			return papers, int(total), err
+		}
 	}
 
 	fetchLimit := limit + 1
@@ -99,49 +105,65 @@ func (c *Cache) quickSearchPostgres(ctx context.Context, query string, limit int
 			LIMIT ?
 		`, query, query, fetchLimit).Scan(&papers).Error
 	})
-	if err != nil {
-		return nil, 0, err
-	}
 	if len(papers) == 0 {
+		return c.quickSearchPostgresFallback(ctx, query, limit)
+	}
+	if err != nil {
+		return c.quickSearchPostgresFallback(ctx, query, limit)
+	}
+	var total int64
+	if err := c.withPostgresSearchLimit(ctx, query, func(tx *gorm.DB) error {
+		return tx.Raw(`SELECT count(*) FROM papers WHERE search_vector @@ plainto_tsquery('english', ?)`, query).Scan(&total).Error
+	}); err != nil {
 		return c.quickSearchPostgresFallback(ctx, query, limit)
 	}
 	if len(papers) > limit {
 		papers = papers[:limit]
 	}
-	return papers, len(papers), nil
+	return papers, int(total), nil
 }
 
-func (c *Cache) quickSearchPostgresID(ctx context.Context, query string, limit int) ([]Paper, bool, error) {
+func (c *Cache) quickSearchPostgresID(ctx context.Context, query string, limit int) ([]Paper, int, bool, error) {
 	if !looksLikePaperIDPrefix(query) {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 	upper, ok := nextStringPrefix(query)
 	if !ok {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 
+	matching := c.db.WithContext(ctx).Model(&Paper{}).Where("id >= ? AND id < ?", query, upper)
+	var total int64
+	if err := matching.Count(&total).Error; err != nil {
+		return nil, 0, true, err
+	}
+	if total == 0 {
+		return nil, 0, false, nil
+	}
 	var papers []Paper
-	err := c.db.WithContext(ctx).
-		Model(&Paper{}).
+	err := matching.
 		Select("id, created, updated, title, authors, categories, pdf_downloaded, src_downloaded").
-		Where("id >= ? AND id < ?", query, upper).
 		Order("id DESC").
 		Limit(limit).
 		Find(&papers).Error
-	return papers, len(papers) > 0, err
+	return papers, int(total), true, err
 }
 
 func (c *Cache) quickSearchPostgresFallback(ctx context.Context, query string, limit int) ([]Paper, int, error) {
 	likePattern := "%" + query + "%"
+	matching := c.db.WithContext(ctx).Model(&Paper{}).
+		Where("id ILIKE ? OR title ILIKE ? OR authors ILIKE ? OR categories ILIKE ?", likePattern, likePattern, likePattern, likePattern)
+	var total int64
+	if err := matching.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 	var papers []Paper
-	err := c.db.WithContext(ctx).
-		Model(&Paper{}).
+	err := matching.
 		Select("id, created, updated, title, authors, categories, pdf_downloaded, src_downloaded").
-		Where("title ILIKE ? OR authors ILIKE ? OR categories ILIKE ?", likePattern, likePattern, likePattern).
 		Order("created DESC NULLS LAST").
 		Limit(limit).
 		Find(&papers).Error
-	return papers, len(papers), err
+	return papers, int(total), err
 }
 
 func looksLikePaperIDPrefix(query string) bool {
@@ -271,7 +293,7 @@ func (c *Cache) searchPostgres(ctx context.Context, query, category string, limi
 	err := c.withPostgresSearchLimit(ctx, query, func(tx *gorm.DB) error {
 		return tx.Raw(sql, args...).Scan(&papers).Error
 	})
-	if err != nil {
+	if err != nil || len(papers) == 0 {
 		// Fallback to ILIKE search if tsvector not populated
 		return c.searchPostgresFallback(ctx, query, category, limit)
 	}
@@ -394,7 +416,8 @@ type CategoryCount struct {
 func (c *Cache) ListCategories(ctx context.Context) ([]CategoryCount, error) {
 	if c.dbType == DBTypePostgres {
 		categories, err := c.listStoredCategories(ctx)
-		if err == nil && len(categories) > 0 {
+		fresh, freshnessErr := c.categoryCountsFresh(ctx)
+		if err == nil && freshnessErr == nil && fresh && len(categories) > 0 {
 			return categories, nil
 		}
 	}
@@ -407,6 +430,20 @@ func (c *Cache) ListCategories(ctx context.Context) ([]CategoryCount, error) {
 		_ = c.storeCategoryCounts(ctx, categories)
 	}
 	return categories, nil
+}
+
+func (c *Cache) categoryCountsFresh(ctx context.Context) (bool, error) {
+	var latestPaper, latestCategory *time.Time
+	if err := c.db.WithContext(ctx).Raw(`SELECT MAX(metadata_updated) FROM papers`).Scan(&latestPaper).Error; err != nil {
+		return false, err
+	}
+	if err := c.db.WithContext(ctx).Raw(`SELECT MAX(updated_at) FROM category_counts`).Scan(&latestCategory).Error; err != nil {
+		return false, err
+	}
+	if latestCategory == nil {
+		return false, nil
+	}
+	return latestPaper == nil || !latestCategory.Before(*latestPaper), nil
 }
 
 func (c *Cache) listStoredCategories(ctx context.Context) ([]CategoryCount, error) {
@@ -579,6 +616,8 @@ func (c *Cache) ListPapersFiltered(ctx context.Context, category string, srcOnly
 
 // DownloadCategory downloads papers for a category.
 func (c *Cache) DownloadCategory(ctx context.Context, category string, limit int, opts *DownloadOptions) error {
+	normalized := normalizedDownloadOptions(opts)
+	opts = &normalized
 	// Use parameter placeholders appropriate for database type
 	placeholder := "?"
 	if c.dbType == DBTypePostgres {
@@ -614,10 +653,10 @@ func (c *Cache) DownloadCategory(ctx context.Context, category string, limit int
 
 	dlPDF := 0
 	dlSrc := 0
-	if opts != nil && opts.DownloadPDF {
+	if opts.DownloadPDF {
 		dlPDF = 1
 	}
-	if opts == nil || opts.DownloadSource {
+	if opts.DownloadSource {
 		dlSrc = 1
 	}
 	args = append(args, dlPDF, dlSrc)
@@ -650,25 +689,5 @@ func (c *Cache) DownloadCategory(ctx context.Context, category string, limit int
 		return err
 	}
 
-	for i, id := range ids {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if opts != nil && opts.Progress != nil {
-			opts.Progress(id, i+1, len(ids))
-		}
-
-		if err := c.DownloadPaper(ctx, id, opts); err != nil {
-			// Log and continue
-			continue
-		}
-
-		// Rate limit
-		time.Sleep(3 * time.Second)
-	}
-
-	return nil
+	return c.downloadPapers(ctx, ids, *opts)
 }

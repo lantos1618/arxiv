@@ -1,5 +1,7 @@
 # SEO Indexing Report - 2026-05-16
 
+> **ARCHIVED SEARCH-INDEXING SNAPSHOT.** This report records crawler observations and actions from 2026-05-16. Index status, sitemap counts, search-engine behavior, and expected outcomes are time-sensitive and must not be treated as current. Use the live sitemap endpoints and fresh webmaster-console data for present decisions.
+
 ## Findings
 
 - Google Search Console is correct that live `robots.txt` contains an unknown directive:

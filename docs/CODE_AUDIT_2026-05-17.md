@@ -1,5 +1,7 @@
 # arxiv.gg Code Audit - 2026-05-17
 
+> **ARCHIVED SNAPSHOT — NOT A CURRENT DEFECT LIST.** This document records observations made on 2026-05-17. Many referenced paths and behaviors have since changed. Use `README.md`, the active topic guides in `docs/`, and `CODE_REVIEW_2026-07-11.md` for disposition; verify every historical finding against current code before acting on it.
+
 Scope: tracked source, templates, scripts, deployment config, docs signals, and visible local workspace hygiene. Excluded `.git` internals and binary contents, but noted tracked/untracked binaries and generated files.
 
 Verification run:

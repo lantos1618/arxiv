@@ -1,100 +1,95 @@
 # Semantic Search
 
-> **Status:** Production MiniLM search is live. Qwen3-Embedding-8B abstract
-> vectors are being backfilled in `embeddings_v2` for higher-quality retrieval
-> and are indexed with HNSW for low-latency nearest-neighbor search.
+## Current Architecture
 
-## Current State
-- API endpoint `/api/v1/search/semantic` serves production semantic search.
-- MiniLM vectors live in `embeddings.vector` with an HNSW index.
-- Qwen abstract vectors live in `embeddings_v2.vector` where
-  `scope = 'abstract'`, `model = 'Qwen/Qwen3-Embedding-8B'`, and `dim = 1024`.
-- Qwen abstract search should use the partial HNSW index
-  `idx_embeddings_v2_qwen_abstract_vector_hnsw`; see
-  `deploy/sql/2026-05-29-qwen-abstract-hnsw-index.sql`.
-- Qwen abstract backfills support `--refresh-stale`, which compares the stored
-  source hash with current title + abstract text and rewrites changed vectors.
-- Full-paper chunk vectors live in `chunk_embeddings_v2.vector` and should use
-  `idx_chunk_embeddings_v2_qwen_vector_hnsw`; see
-  `deploy/sql/2026-05-29-qwen-chunk-hnsw-index.sql`.
-- Full-paper chunks use stable IDs based on `paper_id + scope + chunk_index`.
-  If extracted PDF text changes, the chunk text hash changes and the Qwen chunk
-  backfill refreshes stale vectors instead of silently keeping old embeddings.
+arxiv.gg has one current semantic architecture: `Qwen/Qwen3-Embedding-8B` truncated to 1,024 dimensions and stored in PostgreSQL with pgvector.
 
-## Performance Notes
-- MiniLM is smaller and cheaper to serve, but less nuanced.
-- Qwen3-Embedding-8B is larger and better for research intent, but needs a
-  vector index; without HNSW, 1024d search over ~646k rows took about 1.3s warm
-  and 7s cold in production tests.
-- With the Qwen HNSW index, tested Qwen search was about 13-26ms for nearest
-  neighbor lookup before result rendering.
-- Full-paper chunks are materially heavier than abstracts. On an L40S,
-  3,000-character chunks needed smaller batches than abstracts; batch size 16
-  was stable after a batch size 64 run exhausted GPU memory.
+| Feature | Source | Storage | Retrieval |
+|---|---|---|---|
+| Idea search | Paper title + abstract | `embeddings_v2`, scope `abstract` | Cosine nearest neighbors |
+| Related papers/map | Anchor and neighboring abstract vectors | `embeddings_v2` | Neighbors plus a two-dimensional display projection |
+| Deep Search | Prepared PDF-text chunks | `paper_chunks`, `chunk_embeddings_v2` | Best current chunk per paper |
+| Query embedding | Search text | Qwen query cache/jobs | Synchronous service or leased worker queue |
 
-## Implementation Plan
+Stored vectors are valid only when model, dimension, scope, non-NULL vector, and source hash match the current source. Deep Search joins chunk embeddings to current chunk text hashes so stale vectors are excluded.
 
-### Phase 1: Embedding Generation
-1. **Choose embedding model:**
-   - Open source: `sentence-transformers/all-MiniLM-L6-v2` (384 dims, ~23MB)
-   - Commercial: OpenAI `text-embedding-3-small` (1536 dims, cost ~$0.02/1K tokens)
+The original `embeddings` table, MiniLM service, generic embedding worker, and `tools/generate_embeddings.py` remain for compatibility/migration. They are not an alternate supported product search stack.
 
-2. **Generate embeddings for existing papers:**
-   - Batch process title + abstract for all cached papers
-   - Store in `embeddings` table as binary blobs
-   - Progress tracking for large datasets
+## Request Behavior
 
-3. **Real-time embedding generation:**
-   - Generate embeddings for new papers as they're fetched
-   - Add to download pipeline
+`GET /api/v1/search/semantic` embeds the query and searches Qwen abstract vectors. Quick Search remains the browser default. If no Qwen catalog or execution path is available, the endpoint returns HTTP 206 Quick results with a non-retryable fallback. When a monitored asynchronous worker is configured and a query is queued, the response recommends a bounded retry without claiming that a GPU has started:
 
-### Phase 2: Vector Search Implementation
-1. **Simple approach (SQLite + cosine similarity):**
-   - Load vectors into memory
-   - Calculate cosine similarity in Go
-   - Suitable for <100K papers
+```json
+{
+  "success": true,
+  "data": {
+    "mode": "quick",
+    "model": "quick",
+    "fallback": true,
+    "notice": "..."
+  }
+}
+```
 
-2. **Advanced approach (pgvector):**
-   - PostgreSQL with pgvector extension
-   - Indexed vector search
-   - Scales to millions of papers
+Clients must check `fallback`; `similarity` is `null` in fallback results.
 
-### Phase 3: API Integration
-1. **Query embedding generation:**
-   - Option A: Python subprocess call
-   - Option B: Go embedding library
-   - Option C: BYOK (Bring Your Own Key) for OpenAI
+`GET /api/v1/papers/{id}/similar` requires a current Qwen abstract vector and returns HTTP 409 when none exists. `POST /api/v1/papers/{id}/embeddings` may complete synchronously or return HTTP 202 with `queued`, `status`, and `statusUrl`. Poll the status URL rather than assuming a 202 response means an embedding exists.
 
-2. **Search endpoint:**
-   - Generate query embedding
-   - Find top N similar papers
-   - Return ranked results
+Deep Search is the `deep` mode on `/api/v1/search/stream`. It requires a signed-in session or account API key and only searches prepared, hash-current full-paper chunks.
 
-## Resource Requirements
+## Local Qwen Service
 
-### Storage
-- Open source (384 dims): ~1.5MB per 10K papers
-- OpenAI (1536 dims): ~6MB per 10K papers
-- 2.4M arXiv papers: ~360MB (open source) to ~1.4GB (OpenAI)
+Install the worker requirements in an isolated environment, then start the service from the repository root:
 
-### Memory
-- In-memory vectors: ~500MB for 100K papers (open source)
-- pgvector: Minimal memory with disk-based indexing
+```bash
+python3 -m venv .venv-qwen
+. .venv-qwen/bin/activate
+pip install -r requirements-qwen-worker.txt
+QWEN_EMBEDDING_DEVICE=cuda \
+QWEN_EMBEDDING_DTYPE=bfloat16 \
+uvicorn tools.qwen_embedding_service:app --host 127.0.0.1 --port 8010
+```
 
-### Processing
-- Initial generation: ~2-4 hours for 100K papers (CPU)
-- Real-time: ~50ms per query (local) or ~200ms (OpenAI API)
+Point the Go service or batch tools at `http://127.0.0.1:8010`. Keep inference bound to loopback or a private authenticated network.
 
-## Development Priority
+## Abstract Backfill
 
-1. **MVP:** SQLite + cosine similarity + open source model
-2. **Scale:** pgvector for larger datasets
-3. **Performance:** In-memory caching + hybrid search
+With `DATABASE_URL` explicitly set to the intended PostgreSQL database:
 
-## Next Steps
+```bash
+QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
+python3 tools/qwen_embeddings_v2.py --limit 10000 --batch-size 16
+```
 
-1. Create `tools/generate_embeddings.py` script
-2. Implement vector similarity functions in Go
-3. Update semantic search API endpoint
-4. Add embedding generation to paper fetch pipeline
-5. Test with subset of papers (1K-10K)
+Use `--refresh-stale` to regenerate rows whose source hash no longer matches title + abstract. For queued remote workers, use `tools/qwen_queue_abstract_backfill.sh` and the authenticated worker flow described in [GPU_WORKER_RUNBOOK.md](GPU_WORKER_RUNBOOK.md).
+
+## Full-Paper Preparation
+
+The pipeline is ordered:
+
+```bash
+python3 tools/fetch_full_paper_text.py --limit 100
+python3 tools/chunk_full_papers.py --limit 1000
+QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
+python3 tools/qwen_chunk_embeddings_v2.py --limit 10000 --batch-size 16
+```
+
+All three tools require PostgreSQL. Fetching obeys arXiv access constraints and does not guarantee every paper has an extractable PDF. Chunk settings must keep overlap smaller than chunk size.
+
+## Validation
+
+```bash
+QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
+python3 tools/qwen_pipeline_check.py \
+  --scope both --window-minutes 15 --min-recent 1
+```
+
+Also exercise:
+
+```bash
+curl --get 'http://127.0.0.1:8080/api/v1/search/semantic' \
+  --data-urlencode 'q=causal representation learning'
+curl 'http://127.0.0.1:8080/api/v1/papers/1706.03762/similar?limit=10'
+```
+
+Verify response model/fallback fields, non-NULL vectors, current hashes, queue lease behavior, and the pgvector indexes in production. Throughput and GPU memory depend on hardware, dtype, text length, and batch size; measure the target worker rather than relying on archived estimates.

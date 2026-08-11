@@ -1,29 +1,29 @@
-# arXiv.gg Admin
+# arxiv.gg Admin
 
-The admin area is intentionally small and read-only.
+The admin UI exposes operational database metrics, users and signed-in paper views, audit events, and feedback moderation.
 
 ## Routes
 
-- `/admin` - ops overview, embedding coverage, job queue, plan model, and explicit placeholders.
-- `/admin/users` - real Google users from the `users` table and simple plan counts.
-- `/admin/audit` - admin page-view audit log from `admin_audit_log`.
+- `/admin` — database, catalog, downloads, Qwen/embedding coverage, jobs, and recent activity
+- `/admin/users` — accounts, sessions, and signed-in paper-view aggregates
+- `/admin/audit` — admin page-view and moderation audit events
+- `/admin/feedback` — visible/hidden feedback and moderation controls
+
+Metrics refresh in the background and may lag active workers. User analytics cover accounts, sessions, and signed-in paper views only; anonymous visitors, search queries, billing, and payments are not represented.
 
 ## Access
 
-Admin access supports both paths:
+In production, access is granted by either:
 
-- Google sign-in when the email is listed in `ADMIN_EMAILS`.
-- Existing `ADMIN_TOKEN` for API/admin-token fallback.
+- a signed-in Google account whose email appears in `ADMIN_EMAILS`; or
+- `X-Admin-Token: <ADMIN_TOKEN>` / `Authorization: Bearer <ADMIN_TOKEN>`.
 
-`ADMIN_EMAILS` accepts comma, space, semicolon, or newline separated emails.
+Reusable admin secrets are not accepted in query strings. If neither `ADMIN_TOKEN` nor `ADMIN_EMAILS` is configured, admin endpoints are disabled. `serve -local` bypasses these checks but binds only to loopback.
 
-## Placeholders
+Cookie-authenticated moderation requires same-origin requests. Keep the admin UI behind HTTPS, restrict ingress, rotate exposed tokens, and do not share account API keys as admin credentials.
 
-Rows marked `PLACEHOLDER` are deliberately not fake data. They show areas that are not wired into the app yet:
+## Feedback
 
-- Cloudflare, Google Search Console, Bing, and GA traffic.
-- Payments/Stripe/billing events.
-- Remote GPU worker health.
-- Per-user saved searches and feature usage.
+Signed-in users can submit, vote on, and delete their own suggestions. Administrators can hide or restore posts; hidden posts remain stored. “Post anonymously” hides the public display name but does not remove the user association from operator views or the database.
 
-Those should only become normal rows after the app has real data sources for them.
+The `$100` copy in the public widget is a conditional, discretionary offer, not an automatic bounty. A qualifying idea must be selected, actually shipped, accepted under the offer, and submitted by someone who can be contacted and paid legally. No award is guaranteed for every post, vote leader, overlapping idea, partial implementation, or independently planned feature.

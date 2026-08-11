@@ -3,296 +3,467 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"flag"
+	"fmt"
 	"log"
+	"math"
 	"os"
+	"os/signal"
+	"reflect"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 
 	"github.com/lantos1618/arxiv.gg"
 )
 
-func main() {
-	sqliteDB := flag.String("sqlite", "/data/arxiv/index.db", "SQLite database path")
-	postgresURL := flag.String("postgres", "", "PostgreSQL connection URL (or use DATABASE_URL env)")
-	batchSize := flag.Int("batch", 500, "Batch size for inserts (keep under 3000 for PostgreSQL parameter limit)")
-	flag.Parse()
-
-	pgURL := *postgresURL
-	if pgURL == "" {
-		pgURL = os.Getenv("DATABASE_URL")
-	}
-	if pgURL == "" {
-		log.Fatal("PostgreSQL URL required: use -postgres flag or DATABASE_URL env")
-	}
-
-	ctx := context.Background()
-
-	// Open SQLite source
-	log.Printf("Opening SQLite database: %s", *sqliteDB)
-	srcDB, err := gorm.Open(sqlite.Open(*sqliteDB), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		log.Fatalf("Failed to open SQLite: %v", err)
-	}
-
-	// Open PostgreSQL destination
-	log.Printf("Connecting to PostgreSQL...")
-	dstDB, err := gorm.Open(postgres.Open(pgURL), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
-	})
-	if err != nil {
-		log.Fatalf("Failed to open PostgreSQL: %v", err)
-	}
-
-	// Configure connection pool
-	sqlDB, _ := dstDB.DB()
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(50)
-
-	// Run migrations on PostgreSQL
-	log.Println("Running schema migrations...")
-	if err := dstDB.AutoMigrate(&arxiv.Paper{}, &arxiv.Citation{}, &arxiv.SyncState{}, &arxiv.DownloadQueueItem{}, &arxiv.Embedding{}); err != nil {
-		log.Fatalf("Failed to migrate schema: %v", err)
-	}
-
-	// Initialize PostgreSQL-specific schema (tsvector, indexes)
-	initPostgresSchema(dstDB)
-
-	// Migrate papers
-	log.Println("Migrating papers...")
-	if err := migratePapers(ctx, srcDB, dstDB, *batchSize); err != nil {
-		log.Fatalf("Failed to migrate papers: %v", err)
-	}
-
-	// Migrate citations
-	log.Println("Migrating citations...")
-	if err := migrateCitations(ctx, srcDB, dstDB, *batchSize); err != nil {
-		log.Fatalf("Failed to migrate citations: %v", err)
-	}
-
-	// Migrate embeddings
-	log.Println("Migrating embeddings...")
-	if err := migrateEmbeddings(ctx, srcDB, dstDB, *batchSize); err != nil {
-		log.Fatalf("Failed to migrate embeddings: %v", err)
-	}
-
-	// Migrate sync state
-	log.Println("Migrating sync state...")
-	if err := migrateSyncState(ctx, srcDB, dstDB); err != nil {
-		log.Fatalf("Failed to migrate sync state: %v", err)
-	}
-
-	// Rebuild search index
-	log.Println("Building full-text search index...")
-	if err := rebuildSearchIndex(ctx, dstDB); err != nil {
-		log.Fatalf("Failed to rebuild search index: %v", err)
-	}
-
-	log.Println("Migration complete!")
+type migrationConfig struct {
+	sqlitePath  string
+	postgresURL string
+	batchSize   int
 }
 
-func initPostgresSchema(db *gorm.DB) {
-	// Add indexes
-	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_papers_src_downloaded ON papers(src_downloaded)",
-		"CREATE INDEX IF NOT EXISTS idx_papers_pdf_downloaded ON papers(pdf_downloaded)",
-		"CREATE INDEX IF NOT EXISTS idx_papers_fetched_at ON papers(fetched_at DESC NULLS LAST)",
-		"CREATE INDEX IF NOT EXISTS idx_papers_src_fetched ON papers(src_downloaded, fetched_at DESC NULLS LAST)",
-		"CREATE INDEX IF NOT EXISTS idx_citations_to_id ON citations(to_id)",
-		"CREATE INDEX IF NOT EXISTS idx_citations_from_id ON citations(from_id)",
+type modelMigration struct {
+	name       string
+	model      any
+	primaryKey []string
+	migrate    func(context.Context, *gorm.DB, *gorm.DB, int) error
+}
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := runMigration(ctx, os.Args[1:], os.Getenv); err != nil {
+		log.Print(err)
+		os.Exit(1)
 	}
-	for _, idx := range indexes {
-		db.Exec(idx)
+}
+
+func runMigration(ctx context.Context, args []string, getenv func(string) string) error {
+	config, err := parseMigrationConfig(args, getenv)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(config.sqlitePath)
+	if err != nil {
+		return fmt.Errorf("open SQLite source %q: %w", config.sqlitePath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("SQLite source %q is a directory", config.sqlitePath)
 	}
 
-	// Add tsvector column
-	db.Exec(`ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_vector tsvector`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_papers_search ON papers USING GIN(search_vector)`)
+	log.Printf("Opening SQLite database: %s", config.sqlitePath)
+	src, err := gorm.Open(sqlite.Open(config.sqlitePath), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		return fmt.Errorf("open SQLite: %w", err)
+	}
+	if err := closeDatabaseOnReturn(src); err != nil {
+		return err
+	}
+	defer closeDatabase(src)
 
-	// Create trigger function
-	db.Exec(`
-		CREATE OR REPLACE FUNCTION papers_search_trigger() RETURNS trigger AS $$
-		BEGIN
-			NEW.search_vector :=
-				setweight(to_tsvector('english', COALESCE(NEW.title, '')), 'A') ||
-				setweight(to_tsvector('english', COALESCE(NEW.abstract, '')), 'B');
-			RETURN NEW;
-		END
-		$$ LANGUAGE plpgsql;
-	`)
+	log.Print("Connecting to PostgreSQL...")
+	dst, err := gorm.Open(postgres.Open(config.postgresURL), &gorm.Config{Logger: logger.Default.LogMode(logger.Warn)})
+	if err != nil {
+		return fmt.Errorf("open PostgreSQL: %w", err)
+	}
+	dstSQL, err := dst.DB()
+	if err != nil {
+		return fmt.Errorf("configure PostgreSQL pool: %w", err)
+	}
+	defer dstSQL.Close()
+	dstSQL.SetMaxIdleConns(10)
+	dstSQL.SetMaxOpenConns(50)
 
-	// Create trigger
-	db.Exec(`
-		DROP TRIGGER IF EXISTS papers_search_update ON papers;
-		CREATE TRIGGER papers_search_update
-			BEFORE INSERT OR UPDATE ON papers
-			FOR EACH ROW EXECUTE FUNCTION papers_search_trigger();
-	`)
+	log.Print("Running destination schema migrations...")
+	models := currentModels()
+	modelValues := make([]any, 0, len(models))
+	for _, migration := range models {
+		modelValues = append(modelValues, migration.model)
+	}
+	if err := dst.WithContext(ctx).AutoMigrate(modelValues...); err != nil {
+		return fmt.Errorf("migrate destination schema: %w", err)
+	}
+	if err := initPostgresSchema(dst.WithContext(ctx)); err != nil {
+		return fmt.Errorf("initialize PostgreSQL schema: %w", err)
+	}
+
+	migratedTables := 0
+	skippedTables := 0
+	for _, migration := range models {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("migration canceled: %w", err)
+		}
+		if !src.Migrator().HasTable(migration.model) {
+			log.Printf("Skipping %s: source table is not present", migration.name)
+			skippedTables++
+			continue
+		}
+		log.Printf("Migrating %s...", migration.name)
+		if err := migration.migrate(ctx, src, dst, config.batchSize); err != nil {
+			return fmt.Errorf("migrate %s: %w", migration.name, err)
+		}
+		if src.Migrator().HasColumn(migration.model, "vector") {
+			if err := migrateVectorColumn(ctx, src, dst, migration.model, migration.primaryKey, config.batchSize); err != nil {
+				return fmt.Errorf("migrate %s vectors: %w", migration.name, err)
+			}
+		}
+		migratedTables++
+	}
+
+	log.Print("Building missing full-text search vectors...")
+	if err := rebuildSearchIndex(ctx, dst); err != nil {
+		return fmt.Errorf("rebuild search index: %w", err)
+	}
+	log.Printf("Migration verified: %d source tables copied and checked; %d absent source tables skipped", migratedTables, skippedTables)
+	return nil
+}
+
+func parseMigrationConfig(args []string, getenv func(string) string) (migrationConfig, error) {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	sqlitePath := fs.String("sqlite", "/data/arxiv/index.db", "SQLite database path")
+	postgresURL := fs.String("postgres", "", "PostgreSQL connection URL (or use DATABASE_URL env)")
+	batchSize := fs.Int("batch", 500, "Rows per deterministic migration batch")
+	if err := fs.Parse(args); err != nil {
+		return migrationConfig{}, err
+	}
+	if fs.NArg() != 0 {
+		return migrationConfig{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if *batchSize <= 0 {
+		return migrationConfig{}, fmt.Errorf("batch size must be greater than zero")
+	}
+	url := strings.TrimSpace(*postgresURL)
+	if url == "" {
+		url = strings.TrimSpace(getenv("DATABASE_URL"))
+	}
+	if url == "" {
+		return migrationConfig{}, fmt.Errorf("PostgreSQL URL required: use -postgres or DATABASE_URL")
+	}
+	if strings.TrimSpace(*sqlitePath) == "" {
+		return migrationConfig{}, fmt.Errorf("SQLite database path must not be empty")
+	}
+	return migrationConfig{sqlitePath: *sqlitePath, postgresURL: url, batchSize: *batchSize}, nil
+}
+
+func closeDatabaseOnReturn(db *gorm.DB) error {
+	_, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access database connection: %w", err)
+	}
+	return nil
+}
+
+func closeDatabase(db *gorm.DB) {
+	sqlDB, err := db.DB()
+	if err == nil {
+		_ = sqlDB.Close()
+	}
+}
+
+func currentModels() []modelMigration {
+	return []modelMigration{
+		migrationFor("papers", &arxiv.Paper{}, []string{"id"}),
+		migrationFor("citations", &arxiv.Citation{}, []string{"from_id", "to_id"}),
+		migrationFor("category counts", &arxiv.CategoryStat{}, []string{"name"}),
+		migrationFor("sync state", &arxiv.SyncState{}, []string{"key"}),
+		migrationFor("download queue", &arxiv.DownloadQueueItem{}, []string{"paper_id"}),
+		migrationFor("embeddings", &arxiv.Embedding{}, []string{"paper_id"}),
+		migrationFor("v2 paper embeddings", &arxiv.EmbeddingV2{}, []string{"paper_id", "scope", "model", "dim"}),
+		migrationFor("paper chunks", &arxiv.PaperChunk{}, []string{"id"}),
+		migrationFor("v2 chunk embeddings", &arxiv.ChunkEmbeddingV2{}, []string{"chunk_id", "model", "dim"}),
+		migrationFor("Qwen embedding jobs", &arxiv.QwenEmbeddingJob{}, []string{"id"}),
+		migrationFor("Qwen query embeddings", &arxiv.QwenQueryEmbedding{}, []string{"query_hash", "model", "dim"}),
+		migrationFor("embedding jobs", &arxiv.EmbeddingJob{}, []string{"paper_id"}),
+		migrationFor("author collaborations", &arxiv.AuthorCollaboration{}, []string{"author1", "author2"}),
+		migrationFor("author embeddings", &arxiv.AuthorEmbedding{}, []string{"author"}),
+		migrationFor("users", &arxiv.User{}, []string{"id"}),
+		migrationFor("login codes", &arxiv.LoginCode{}, []string{"id"}),
+		migrationFor("user sessions", &arxiv.UserSession{}, []string{"id"}),
+		migrationFor("user API keys", &arxiv.UserAPIKey{}, []string{"id"}),
+		migrationFor("user paper views", &arxiv.UserPaperView{}, []string{"user_id", "paper_id"}),
+		migrationFor("feedback posts", &arxiv.FeedbackPost{}, []string{"id"}),
+		migrationFor("feedback votes", &arxiv.FeedbackVote{}, []string{"user_id", "post_id"}),
+		migrationFor("admin audit log", &arxiv.AdminAuditLog{}, []string{"id"}),
+	}
+}
+
+func migrationFor[T any](name string, model *T, primaryKey []string) modelMigration {
+	return modelMigration{
+		name:       name,
+		model:      model,
+		primaryKey: primaryKey,
+		migrate: func(ctx context.Context, src, dst *gorm.DB, batchSize int) error {
+			return migrateRows[T](ctx, src, dst, batchSize)
+		},
+	}
+}
+
+func migrateRows[T any](ctx context.Context, src, dst *gorm.DB, batchSize int) error {
+	var model T
+	var total int64
+	if err := src.WithContext(ctx).Model(&model).Count(&total).Error; err != nil {
+		return fmt.Errorf("count source rows: %w", err)
+	}
+	order, err := primaryKeyOrder(src, &model)
+	if err != nil {
+		return err
+	}
+
+	processed := int64(0)
+	for offset := 0; ; offset += batchSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var rows []T
+		query := src.WithContext(ctx).Order(order).Offset(offset).Limit(batchSize).Find(&rows)
+		if query.Error != nil {
+			return fmt.Errorf("read source batch at offset %d: %w", offset, query.Error)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		if err := dst.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(rows, batchSize).Error; err != nil {
+			return fmt.Errorf("upsert batch at offset %d: %w", offset, err)
+		}
+		if err := verifyBatchKeys(ctx, dst, &model, rows); err != nil {
+			return fmt.Errorf("verify batch at offset %d: %w", offset, err)
+		}
+		processed += int64(len(rows))
+		log.Printf("  Processed %d/%d rows", processed, total)
+	}
+	if processed != total {
+		return fmt.Errorf("source changed during migration: counted %d rows but processed %d", total, processed)
+	}
+	var destinationTotal int64
+	if err := dst.WithContext(ctx).Model(&model).Count(&destinationTotal).Error; err != nil {
+		return fmt.Errorf("count destination rows: %w", err)
+	}
+	if destinationTotal < total {
+		return fmt.Errorf("verification failed: source has %d rows, destination has %d", total, destinationTotal)
+	}
+	log.Printf("  Verified %d source rows (%d total destination rows)", total, destinationTotal)
+	return nil
+}
+
+func verifyBatchKeys[T any](ctx context.Context, dst *gorm.DB, model *T, rows []T) error {
+	statement := &gorm.Statement{DB: dst}
+	if err := statement.Parse(model); err != nil {
+		return err
+	}
+	groups := make([]string, 0, len(rows))
+	args := make([]any, 0, len(rows)*len(statement.Schema.PrimaryFields))
+	for rowIndex := range rows {
+		conditions := make([]string, 0, len(statement.Schema.PrimaryFields))
+		value := reflect.ValueOf(&rows[rowIndex])
+		for _, field := range statement.Schema.PrimaryFields {
+			fieldValue, _ := field.ValueOf(ctx, value)
+			conditions = append(conditions, field.DBName+" = ?")
+			args = append(args, fieldValue)
+		}
+		groups = append(groups, "("+strings.Join(conditions, " AND ")+")")
+	}
+	var found int64
+	if err := dst.WithContext(ctx).Model(model).Where(strings.Join(groups, " OR "), args...).Count(&found).Error; err != nil {
+		return err
+	}
+	if found != int64(len(rows)) {
+		return fmt.Errorf("found %d of %d source primary keys at destination", found, len(rows))
+	}
+	return nil
+}
+
+func primaryKeyOrder(db *gorm.DB, model any) (string, error) {
+	statement := &gorm.Statement{DB: db}
+	if err := statement.Parse(model); err != nil {
+		return "", fmt.Errorf("inspect model primary key: %w", err)
+	}
+	columns := make([]string, 0, len(statement.Schema.PrimaryFields))
+	for _, field := range statement.Schema.PrimaryFields {
+		columns = append(columns, field.DBName)
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("model %s has no primary key", statement.Schema.Table)
+	}
+	return strings.Join(columns, ", "), nil
 }
 
 func migratePapers(ctx context.Context, src, dst *gorm.DB, batchSize int) error {
-	var total int64
-	src.Model(&arxiv.Paper{}).Count(&total)
-
-	var existing int64
-	dst.Model(&arxiv.Paper{}).Count(&existing)
-	log.Printf("Found %d papers in SQLite, %d already in PostgreSQL", total, existing)
-
-	// Get IDs already in PostgreSQL
-	var existingIDs []string
-	dst.Model(&arxiv.Paper{}).Pluck("id", &existingIDs)
-	existingSet := make(map[string]bool, len(existingIDs))
-	for _, id := range existingIDs {
-		existingSet[id] = true
-	}
-
-	var offset int
-	for {
-		var papers []arxiv.Paper
-		if err := src.Offset(offset).Limit(batchSize).Find(&papers).Error; err != nil {
-			return err
-		}
-		if len(papers) == 0 {
-			break
-		}
-
-		// Filter out existing papers
-		var newPapers []arxiv.Paper
-		for _, p := range papers {
-			if !existingSet[p.ID] {
-				newPapers = append(newPapers, p)
-				existingSet[p.ID] = true // Mark as will-be-inserted
-			}
-		}
-
-		// Insert new papers in small batches (18 columns × 200 = 3600 params, safe)
-		if len(newPapers) > 0 {
-			if err := dst.WithContext(ctx).CreateInBatches(newPapers, 200).Error; err != nil {
-				// On error, try smaller batches
-				for _, p := range newPapers {
-					dst.WithContext(ctx).Create(&p)
-				}
-			}
-		}
-
-		offset += len(papers)
-		log.Printf("  Processed %d/%d papers (%.1f%%), inserted %d new", offset, total, float64(offset)/float64(total)*100, len(newPapers))
-
-		if offset >= int(total) {
-			break
-		}
-	}
-
-	return nil
+	return migrateRows[arxiv.Paper](ctx, src, dst, batchSize)
 }
 
 func migrateCitations(ctx context.Context, src, dst *gorm.DB, batchSize int) error {
-	var total int64
-	src.Model(&arxiv.Citation{}).Count(&total)
-	log.Printf("Found %d citations to migrate", total)
-
-	if total == 0 {
-		return nil
-	}
-
-	var offset int
-	for {
-		var citations []arxiv.Citation
-		if err := src.Offset(offset).Limit(batchSize).Find(&citations).Error; err != nil {
-			return err
-		}
-		if len(citations) == 0 {
-			break
-		}
-
-		if err := dst.WithContext(ctx).Create(&citations).Error; err != nil {
-			for _, c := range citations {
-				dst.WithContext(ctx).Create(&c)
-			}
-		}
-
-		offset += len(citations)
-		log.Printf("  Migrated %d/%d citations (%.1f%%)", offset, total, float64(offset)/float64(total)*100)
-
-		if offset >= int(total) {
-			break
-		}
-	}
-
-	return nil
+	return migrateRows[arxiv.Citation](ctx, src, dst, batchSize)
 }
 
 func migrateEmbeddings(ctx context.Context, src, dst *gorm.DB, batchSize int) error {
-	var total int64
-	src.Model(&arxiv.Embedding{}).Count(&total)
-	log.Printf("Found %d embeddings to migrate", total)
-
-	if total == 0 {
-		return nil
+	if err := migrateRows[arxiv.Embedding](ctx, src, dst, batchSize); err != nil {
+		return err
 	}
-
-	var offset int
-	for {
-		var embeddings []arxiv.Embedding
-		if err := src.Offset(offset).Limit(batchSize).Find(&embeddings).Error; err != nil {
-			return err
-		}
-		if len(embeddings) == 0 {
-			break
-		}
-
-		if err := dst.WithContext(ctx).Create(&embeddings).Error; err != nil {
-			for _, e := range embeddings {
-				dst.WithContext(ctx).Create(&e)
-			}
-		}
-
-		offset += len(embeddings)
-		log.Printf("  Migrated %d/%d embeddings (%.1f%%)", offset, total, float64(offset)/float64(total)*100)
-
-		if offset >= int(total) {
-			break
-		}
+	if src.Migrator().HasColumn(&arxiv.Embedding{}, "vector") {
+		return migrateVectorColumn(ctx, src, dst, &arxiv.Embedding{}, []string{"paper_id"}, batchSize)
 	}
-
 	return nil
 }
 
 func migrateSyncState(ctx context.Context, src, dst *gorm.DB) error {
-	var states []arxiv.SyncState
-	if err := src.Find(&states).Error; err != nil {
+	return migrateRows[arxiv.SyncState](ctx, src, dst, 500)
+}
+
+func migrateVectorColumn(ctx context.Context, src, dst *gorm.DB, model any, primaryKeys []string, batchSize int) error {
+	statement := &gorm.Statement{DB: src}
+	if err := statement.Parse(model); err != nil {
 		return err
 	}
-
-	for _, s := range states {
-		dst.WithContext(ctx).Create(&s)
+	table := statement.Schema.Table
+	quotedKeys := make([]string, len(primaryKeys))
+	for i, key := range primaryKeys {
+		quotedKeys[i] = `"` + key + `"`
 	}
+	selectColumns := append(append([]string{}, quotedKeys...), `"vector"`)
+	processed := 0
+	for offset := 0; ; offset += batchSize {
+		rows, err := src.WithContext(ctx).Raw(
+			fmt.Sprintf(`SELECT %s FROM "%s" ORDER BY %s LIMIT ? OFFSET ?`, strings.Join(selectColumns, ", "), table, strings.Join(quotedKeys, ", ")),
+			batchSize, offset,
+		).Rows()
+		if err != nil {
+			return err
+		}
+		batchRows := 0
+		for rows.Next() {
+			values := make([]any, len(primaryKeys)+1)
+			pointers := make([]any, len(values))
+			for i := range values {
+				pointers[i] = &values[i]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				rows.Close()
+				return err
+			}
+			query := fmt.Sprintf(`UPDATE "%s" SET "vector" = ? WHERE `, table)
+			args := []any{values[len(values)-1]}
+			if dst.Dialector.Name() == "postgres" {
+				vector, err := postgresVector(values[len(values)-1])
+				if err != nil {
+					rows.Close()
+					return fmt.Errorf("convert vector at source offset %d: %w", offset+batchRows, err)
+				}
+				query = fmt.Sprintf(`UPDATE "%s" SET "vector" = CAST(? AS vector) WHERE `, table)
+				args[0] = vector
+			}
+			conditions := make([]string, len(primaryKeys))
+			for i, key := range primaryKeys {
+				conditions[i] = `"` + key + `" = ?`
+				args = append(args, values[i])
+			}
+			result := dst.WithContext(ctx).Exec(query+strings.Join(conditions, " AND "), args...)
+			if result.Error != nil {
+				rows.Close()
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				rows.Close()
+				return fmt.Errorf("updated %d destination rows for source vector, want 1", result.RowsAffected)
+			}
+			batchRows++
+			processed++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if batchRows == 0 {
+			break
+		}
+	}
+	log.Printf("  Migrated %d vector values", processed)
+	return nil
+}
 
-	log.Printf("  Migrated %d sync state entries", len(states))
+func postgresVector(value any) (any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if text, ok := value.(string); ok {
+		return text, nil
+	}
+	data, ok := value.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("unsupported vector value %T", value)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed, "[") {
+		return trimmed, nil
+	}
+	if len(data)%4 != 0 {
+		return nil, fmt.Errorf("binary vector has %d bytes, not a multiple of four", len(data))
+	}
+	parts := make([]string, len(data)/4)
+	for i := range parts {
+		bits := binary.LittleEndian.Uint32(data[i*4 : i*4+4])
+		parts[i] = strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32)
+	}
+	return "[" + strings.Join(parts, ",") + "]", nil
+}
+
+func initPostgresSchema(db *gorm.DB) error {
+	statements := []string{
+		`CREATE EXTENSION IF NOT EXISTS vector`,
+		`CREATE INDEX IF NOT EXISTS idx_papers_src_downloaded ON papers(src_downloaded)`,
+		`CREATE INDEX IF NOT EXISTS idx_papers_pdf_downloaded ON papers(pdf_downloaded)`,
+		`CREATE INDEX IF NOT EXISTS idx_papers_fetched_at ON papers(fetched_at DESC NULLS LAST)`,
+		`CREATE INDEX IF NOT EXISTS idx_papers_src_fetched ON papers(src_downloaded, fetched_at DESC NULLS LAST)`,
+		`CREATE INDEX IF NOT EXISTS idx_citations_to_id ON citations(to_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_citations_from_id ON citations(from_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_api_keys_active_name ON user_api_keys(user_id, name) WHERE revoked_at IS NULL`,
+		`ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS vector vector(384)`,
+		`ALTER TABLE embeddings_v2 ADD COLUMN IF NOT EXISTS vector vector(1024)`,
+		`ALTER TABLE chunk_embeddings_v2 ADD COLUMN IF NOT EXISTS vector vector(1024)`,
+		`ALTER TABLE qwen_query_embeddings ADD COLUMN IF NOT EXISTS vector vector(1024)`,
+		`ALTER TABLE author_embeddings ADD COLUMN IF NOT EXISTS vector vector(384)`,
+		`CREATE INDEX IF NOT EXISTS idx_embeddings_vector_hnsw ON embeddings USING hnsw (vector vector_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_embeddings_v2_lookup ON embeddings_v2(scope, model, dim, paper_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_v2_lookup ON chunk_embeddings_v2(model, dim, chunk_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_qwen_query_embeddings_lookup ON qwen_query_embeddings(query_hash, model, dim)`,
+		`CREATE INDEX IF NOT EXISTS idx_author_embeddings_vector_hnsw ON author_embeddings USING hnsw (vector vector_cosine_ops)`,
+		`ALTER TABLE papers ADD COLUMN IF NOT EXISTS search_vector tsvector`,
+		`CREATE INDEX IF NOT EXISTS idx_papers_search ON papers USING GIN(search_vector)`,
+		`CREATE OR REPLACE FUNCTION papers_search_trigger() RETURNS trigger AS $$ BEGIN NEW.search_vector := setweight(to_tsvector('english', COALESCE(NEW.title, '')), 'A') || setweight(to_tsvector('english', COALESCE(NEW.abstract, '')), 'B'); RETURN NEW; END $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS papers_search_update ON papers`,
+		`CREATE TRIGGER papers_search_update BEFORE INSERT OR UPDATE ON papers FOR EACH ROW EXECUTE FUNCTION papers_search_trigger()`,
+	}
+	for _, statement := range statements {
+		if err := db.Exec(statement).Error; err != nil {
+			return fmt.Errorf("execute schema statement %q: %w", statement, err)
+		}
+	}
 	return nil
 }
 
 func rebuildSearchIndex(ctx context.Context, db *gorm.DB) error {
 	start := time.Now()
-
-	// Update all search vectors in batches
 	result := db.WithContext(ctx).Exec(`
 		UPDATE papers SET search_vector =
 			setweight(to_tsvector('english', COALESCE(title, '')), 'A') ||
 			setweight(to_tsvector('english', COALESCE(abstract, '')), 'B')
 		WHERE search_vector IS NULL
 	`)
-
 	if result.Error != nil {
 		return result.Error
 	}
-
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	log.Printf("  Updated %d search vectors in %v", result.RowsAffected, time.Since(start))
 	return nil
 }

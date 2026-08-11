@@ -1,116 +1,115 @@
-# System Setup Guide
+# System Setup
 
-## Requirements
+## Supported Architecture
 
-### Hardware
-- **RAM:** 8GB+ minimum (15GB+ recommended for large datasets)
-- **CPU:** 4+ cores (8+ recommended for embedding generation)
-- **Disk:** 100GB+ free space (500GB+ for full arXiv cache)
+A supported arxiv.gg deployment uses PostgreSQL with pgvector. SQLite is retained for unit tests and legacy maintenance only; it does not support the production Qwen vector-search architecture.
 
-### Software
-- **Go:** 1.18+ 
-- **Python:** 3.8+ (for embedding generation)
-- **SQLite:** 3.35+ (for FTS5 support)
+Required software:
 
-## Installation
+- Go 1.25
+- PostgreSQL and pgvector
+- Python 3 for ingestion and Qwen workers
+- Poppler's `pdftotext` for PDF text preparation
+- Docker/Compose for the production runbook
+- CUDA hardware or a remote GPU service for Qwen inference
 
-### 1. Build from Source
-```bash
-git clone https://github.com/lantos1618/arxiv.gg.git
-cd arxiv
-make build
-sudo make install  # Optional: installs to /usr/local/bin
-```
+Storage depends on catalog and file coverage. Metadata alone is much smaller than a corpus containing PDFs, extracted text, chunks, and vectors; capacity-plan from measured ingestion batches rather than historical repository estimates.
 
-### 2. Dependencies
-```bash
-# For embedding generation (optional)
-pip3 install sentence-transformers numpy
-
-# For advanced features (optional)
-# PostgreSQL with pgvector extension for large-scale vector search
-```
-
-## Quick Start
-
-### 1. Initialize Cache
-```bash
-export ARXIV_CACHE=/path/to/cache  # Defaults to ~/.cache/arxiv
-arxiv sync -set cs                # Sync computer science papers (metadata only)
-```
-
-### 2. Fetch Papers
-```bash
-arxiv fetch 2301.00001           # Fetch single paper with source
-arxiv fetch -pdf 2301.00001      # Fetch with PDF
-arxiv fetch -all 2301.00001      # Fetch with source + PDF
-```
-
-### 3. Start Web Server
-```bash
-arxiv serve                      # Starts on http://localhost:8080
-arxiv serve -port 3000           # Custom port
-```
-
-## Production Setup
-
-### Large-Scale Deployment
-```bash
-# Use dedicated disk for cache
-export ARXIV_CACHE=/data/arxiv
-
-# Sync all categories (metadata only)
-arxiv sync
-
-# Generate embeddings for semantic search
-python3 tools/generate_embeddings.py --cache $ARXIV_CACHE
-
-# Start server with production settings
-arxiv serve -port 8080
-```
-
-### Environment Variables
-- `ARXIV_CACHE`: Cache directory path
-- `ARXIV_RATE_LIMIT`: API rate limit (default: 100 req/min)
-- `ARXIV_CACHE_SIZE`: LRU cache size in MB (default: 500)
-
-## Testing Setup
+## Build
 
 ```bash
-# Verify installation
-arxiv stats
-arxiv search "machine learning" -limit 5
-
-# Test web interface
-curl http://localhost:8080/api/v1/stats
+go mod download
+go test ./...
+go build -o bin/arxiv ./cmd/arxiv
 ```
 
-## Troubleshooting
+## PostgreSQL
 
-### FTS5 Not Available
-If you get "FTS5 not available" errors:
+Create a database with pgvector available, then export an explicit URL:
+
 ```bash
-# Upgrade SQLite or use the included binary
-sudo apt-get install sqlite3 libsqlite3-dev
+export ARXIV_CACHE="$PWD/.cache/arxiv"
+export DATABASE_URL='postgres://arxiv:password@127.0.0.1:5432/arxiv?sslmode=disable'
+./bin/arxiv stats
 ```
 
-### Memory Issues
-For large datasets:
+Opening the cache runs GORM `AutoMigrate` and backend-specific schema/index initialization. Use a disposable database for development, and rehearse schema changes against a recent production copy before deployment.
+
+## Catalog Ingestion
+
+Sync a bounded metadata set first:
+
 ```bash
-# Reduce cache size
-export ARXIV_CACHE_SIZE=200
-
-# Use disk-based storage
-export ARXIV_CACHE=/data/arxiv
+./bin/arxiv sync -set cs -from 2024-01-01 -batch 1000
+./bin/arxiv search -limit 10 "graph neural network"
 ```
 
-### Embedding Generation
+Fetch selected source/PDF files when needed:
+
 ```bash
-# Test embedding model
-python3 -c "
-from sentence_transformers import SentenceTransformer
-model = SentenceTransformer('all-MiniLM-L6-v2')
-print('Model loaded, embedding dimension:', len(model.encode('test')))
-"
+./bin/arxiv fetch -all 1706.03762
 ```
 
+Use [SEMANTIC_SEARCH.md](SEMANTIC_SEARCH.md) to populate current Qwen vectors. `reindex -embeddings` now returns an explicit retirement error; `tools/generate_embeddings.py` is gated for isolated legacy migrations only.
+
+## Accounts
+
+Google sign-in is enabled by either environment credentials or a Google OAuth credentials file:
+
+```dotenv
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URL=https://example.com/auth/google/callback
+# Alternative when ID/secret are not set:
+GOOGLE_OAUTH_CREDENTIALS_FILE=/run/secrets/google-oauth.json
+```
+
+Set `ADMIN_EMAILS` to a comma/space-separated allowlist for signed-in administrators. `ADMIN_TOKEN` supports header-based operational access. Account API keys are created from `/account`, stored hashed, shown in full only when created/regenerated, and accepted as `Authorization: Bearer arxivgg_...`.
+
+## Serve
+
+```bash
+./bin/arxiv serve -port 8080
+curl -fsS http://127.0.0.1:8080/health
+```
+
+The health response must report `"db":"postgres"`. Normal mode binds all interfaces. `-local` binds loopback and relaxes privileged checks for a trusted local workstation; never expose local mode through an unauthenticated network path.
+
+## Important Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Required PostgreSQL URL for supported deployments |
+| `ARXIV_CACHE` | PDF/source/meta cache root |
+| `PORT` | Container server port used by `start.sh` |
+| `ADMIN_TOKEN` | Explicit admin API credential |
+| `ADMIN_EMAILS` | Google-account admin allowlist |
+| `QWEN_WORKER_TOKEN` | Remote Qwen job API credential |
+| `QWEN_EMBEDDING_SERVICE_URL` | Synchronous Qwen service URL |
+| `QWEN_ASYNC_WORKER_ENABLED` | Set `true` only while a monitored Qwen queue worker/orchestrator is operational |
+| `TRUST_PROXY_HEADERS` | Trust forwarded client IP only behind a sanitizing proxy |
+| `INDEXNOW_KEY` | Enables the matching IndexNow key route |
+| `SITE_URL` | Canonical base URL for generated sitemap/export links |
+| `ARXIV_DB_MAX_OPEN_CONNS` | PostgreSQL pool maximum; default 30 |
+| `ARXIV_DB_MAX_IDLE_CONNS` | PostgreSQL idle pool maximum; default 10 |
+| `ARXIV_DETAIL_CACHE_SIZE` | Detail LRU entry limit; default 20,000 |
+
+Legacy MiniLM service variables and flags remain in compatibility code but are not part of the production container startup or current semantic setup.
+
+## Proxy Safety
+
+Leave `TRUST_PROXY_HEADERS=false` unless the application is reachable only through a trusted proxy that removes or overwrites `CF-Connecting-IP` and `X-Forwarded-For`. Incorrect trust lets clients spoof the address used by rate limits.
+
+## Legacy SQLite Tests
+
+The Go suite creates temporary SQLite databases. Make backend selection explicit:
+
+```bash
+env -u DATABASE_URL go test ./...
+```
+
+An application startup that prints `Using SQLite database` is not a successful production fallback. Stop and correct `DATABASE_URL`.
+
+## Production
+
+Use [DEPLOYMENT_RUNBOOK_2026-05-15.md](DEPLOYMENT_RUNBOOK_2026-05-15.md). Preserve the external PostgreSQL volume, build an immutable release from a clean commit, back up schema, apply reviewed SQL, and retain the exact previous image for rollback.

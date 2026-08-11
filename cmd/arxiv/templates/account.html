@@ -4,8 +4,18 @@
 	.account-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin-bottom: 1rem; }
 	.account-table th, .account-table td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.45rem; text-align: left; vertical-align: top; }
 	.account-table th { color: #374151; font-weight: 700; background: #f9fafb; }
+	.account-api { border: 1px solid #d1d5db; border-radius: 8px; padding: 1rem; margin: 1.25rem 0 1.75rem; background: #f9fafb; }
+	.account-api-grid { display: grid; gap: 0.55rem; margin: 0.75rem 0; }
+	.account-api-copy { display: flex; gap: 0.5rem; align-items: stretch; }
+	.account-api-copy input { flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 6px; padding: 0.55rem 0.65rem; font: inherit; background: #fff; }
+	.account-api code { word-break: break-all; }
+	.account-api-notice { color: #047857; font-size: 0.9rem; margin: 0.5rem 0; }
+	.account-api-notice.warning { color: #92400e; }
+	.account-api-muted { color: #6b7280; font-size: 0.9rem; }
+	.account-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 	@media (max-width: 760px) {
 		.account-table { display: block; overflow-x: auto; white-space: nowrap; }
+		.account-api-copy { flex-direction: column; }
 	}
 </style>
 <h1>Account</h1>
@@ -17,12 +27,45 @@
 	<p><strong>Plan:</strong> {{.User.Plan}}</p>
 </div>
 
-<h2>What This Unlocks Next</h2>
-<ul>
-	<li>Saved searches and paper maps.</li>
-	<li>Topic, author, and category alerts.</li>
-	<li>Full-body paper search while it is free during testing.</li>
-</ul>
+<h2>Sub-Agent API Access</h2>
+<div class="account-api">
+	{{if .APIKeyNotice}}<p class="account-api-notice">{{.APIKeyNotice}}</p>{{end}}
+	{{if .APIKey}}
+		<div class="account-api-grid">
+			<label for="account-api-key"><strong>API key</strong></label>
+			<div class="account-api-copy">
+				<input id="account-api-key" type="text" readonly value="{{.APIKey}}">
+				<button class="btn" type="button" data-copy-target="account-api-key">Copy API key</button>
+			</div>
+			<div class="account-api-copy">
+				<input id="account-api-header" type="text" readonly value="Authorization: Bearer {{.APIKey}}">
+				<button class="btn btn-secondary" type="button" data-copy-target="account-api-header">Copy header</button>
+			</div>
+		</div>
+	{{else if .APIKeyMasked}}
+		<p><strong>Active key:</strong> <code>{{.APIKeyMasked}}</code></p>
+		<p class="account-api-muted">The full key is only shown when it is created or regenerated.</p>
+	{{else}}
+		<p class="account-api-muted">No API key is active yet.</p>
+	{{end}}
+	{{with .APIKeyRecord}}
+		<p class="account-api-muted">Created {{timeStamp .CreatedAt}}. Last used {{timeOrDash .LastUsedAt}}.</p>
+	{{end}}
+	<p class="account-api-muted">Use this for REST calls and MCP tools from Codex, Claude, or a sub-agent. Public paper/search tools still work without a key; account and Deep Search flows require one.</p>
+	<div class="account-actions">
+		<form method="post" action="/account/api-key/regenerate">
+			{{if .APIKeyRecord}}
+			<p class="account-api-notice warning"><strong>Warning:</strong> Rotating the key immediately revokes the current key. Any agent or integration using it will stop working until updated.</p>
+			<label><input type="checkbox" name="confirm_rotation" value="rotate" required> I understand and want to rotate this key.</label><br>
+			<button class="btn btn-secondary" type="submit">Rotate API key</button>
+			{{else}}
+			<p class="account-api-muted">Create a key only when an agent or integration needs authenticated access.</p>
+			<button class="btn" type="submit">Create API key</button>
+			{{end}}
+		</form>
+		<a class="btn btn-secondary" href="/api/v1/">Open API setup</a>
+	</div>
+</div>
 
 <h2>Recently Viewed</h2>
 {{if .RecentViews}}
@@ -43,7 +86,13 @@
 <p>No signed-in paper views yet.</p>
 {{end}}
 
-<h2>Readers Like You</h2>
+{{if eq .PeerViewsSource "personalized"}}
+<h2>Readers With Similar History</h2>
+<p class="account-api-muted">Personalized from papers you viewed and papers viewed by readers with overlapping history.</p>
+{{else}}
+<h2>Recent Community Reading</h2>
+<p class="account-api-muted">Global signed-in reading activity, shown because there is not enough overlap for personalized results yet.</p>
+{{end}}
 {{if .PeerViews}}
 <table class="account-table">
 	<thead><tr><th>Paper</th><th>Categories</th><th>Readers</th><th>Views</th></tr></thead>
@@ -59,12 +108,48 @@
 	</tbody>
 </table>
 {{else}}
-<p>No community reading signal yet.</p>
+<p>No signed-in community reading activity is available yet.</p>
 {{end}}
 
 <form method="post" action="/logout">
 	<button class="btn btn-secondary" type="submit">Sign out</button>
 </form>
+
+<script>
+(function() {
+	function copyValue(id, button) {
+		const input = document.getElementById(id);
+		if (!input) return;
+		const value = input.value;
+		const report = function(message) {
+			if (!button) return;
+			const original = button.textContent;
+			button.textContent = message;
+			window.setTimeout(function() { button.textContent = original; }, 1400);
+		};
+		const fallbackCopy = function() {
+			input.focus();
+			input.select();
+			try {
+				const copied = document.execCommand('copy');
+				report(copied ? 'Copied' : 'Copy failed');
+			} catch (err) {
+				report('Copy failed');
+			}
+		};
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(value).then(function() { report('Copied'); }).catch(fallbackCopy);
+			return;
+		}
+		fallbackCopy();
+	}
+	document.querySelectorAll('[data-copy-target]').forEach(function(button) {
+		button.addEventListener('click', function() {
+			copyValue(button.getAttribute('data-copy-target'), button);
+		});
+	});
+})();
+</script>
 
 {{template "foot" .}}
 {{end}}

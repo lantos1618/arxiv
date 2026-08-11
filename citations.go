@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // UpdateCitations extracts references from a paper's source and stores citation edges.
@@ -13,23 +16,32 @@ func (c *Cache) UpdateCitations(ctx context.Context, paperID, srcPath string) er
 		return nil
 	}
 
-	refs := ExtractReferences(srcPath)
-	if len(refs) == 0 {
-		return nil
+	refs, err := extractReferences(srcPath)
+	if err != nil {
+		return fmt.Errorf("extract references: %w", err)
 	}
-
-	// Delete existing citations from this paper (in case of re-index)
-	c.db.WithContext(ctx).Where("from_id = ?", paperID).Delete(&Citation{})
-
-	// Insert new citations
-	for _, refID := range refs {
-		if refID == paperID {
-			continue // Skip self-citations
+	err = c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("from_id = ?", paperID).Delete(&Citation{}).Error; err != nil {
+			return fmt.Errorf("delete citations: %w", err)
 		}
-		citation := Citation{FromID: paperID, ToID: refID}
-		c.db.WithContext(ctx).FirstOrCreate(&citation, citation)
+		citations := make([]Citation, 0, len(refs))
+		for _, refID := range refs {
+			if refID != paperID {
+				citations = append(citations, Citation{FromID: paperID, ToID: refID})
+			}
+		}
+		if len(citations) == 0 {
+			return nil
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&citations).Error; err != nil {
+			return fmt.Errorf("insert citations: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-
+	c.detailLRU.Clear()
 	return nil
 }
 

@@ -95,4 +95,3 @@ func (lru *LRUCache) Size() int {
 	defer lru.mu.RUnlock()
 	return len(lru.cache)
 }
-

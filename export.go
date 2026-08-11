@@ -7,9 +7,9 @@ import (
 
 // BibTeXEntry represents a BibTeX entry for a paper
 type BibTeXEntry struct {
-	Type      string            // @article, @misc, etc.
-	Key       string            // Citation key
-	Fields    map[string]string // BibTeX fields
+	Type   string            // @article, @misc, etc.
+	Key    string            // Citation key
+	Fields map[string]string // BibTeX fields
 }
 
 // ToBibTeX converts a Paper to BibTeX format
@@ -142,14 +142,8 @@ func (p *Paper) formatAuthorsBibTeX() string {
 		return ""
 	}
 
-	// Split by "and" or comma
-	parts := strings.Split(p.Authors, " and ")
-	if len(parts) == 1 {
-		parts = strings.Split(p.Authors, ",")
-	}
-
 	var formatted []string
-	for _, part := range parts {
+	for _, part := range ParseAuthors(p.Authors) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -176,17 +170,18 @@ func (p *Paper) formatAuthorsBibTeX() string {
 
 // escapeBibTeX escapes special characters in BibTeX strings
 func escapeBibTeX(s string) string {
-	s = strings.ReplaceAll(s, "{", "\\{")
-	s = strings.ReplaceAll(s, "}", "\\}")
-	s = strings.ReplaceAll(s, "&", "\\&")
-	s = strings.ReplaceAll(s, "%", "\\%")
-	s = strings.ReplaceAll(s, "$", "\\$")
-	s = strings.ReplaceAll(s, "#", "\\#")
-	s = strings.ReplaceAll(s, "^", "\\textasciicircum{}")
-	s = strings.ReplaceAll(s, "_", "\\_")
-	s = strings.ReplaceAll(s, "~", "\\textasciitilde{}")
-	s = strings.ReplaceAll(s, "\\", "\\textbackslash{}")
-	return s
+	return strings.NewReplacer(
+		"\\", "\\textbackslash{}",
+		"{", "\\{",
+		"}", "\\}",
+		"&", "\\&",
+		"%", "\\%",
+		"$", "\\$",
+		"#", "\\#",
+		"^", "\\textasciicircum{}",
+		"_", "\\_",
+		"~", "\\textasciitilde{}",
+	).Replace(s)
 }
 
 func min(a, b int) int {
@@ -206,7 +201,7 @@ func (p *Paper) ToRIS() string {
 	}
 
 	if p.Authors != "" {
-		for _, author := range strings.Split(p.Authors, " and ") {
+		for _, author := range ParseAuthors(p.Authors) {
 			author = strings.TrimSpace(author)
 			if author != "" {
 				sb.WriteString(fmt.Sprintf("AU  - %s\n", author))
@@ -241,4 +236,3 @@ func (p *Paper) ToRIS() string {
 	sb.WriteString("ER  - \n")
 	return sb.String()
 }
-

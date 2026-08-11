@@ -16,10 +16,30 @@
 	<meta name="twitter:card" content="summary">
 	<meta name="twitter:title" content="{{.Paper.Title}} - arXiv.gg">
 	<meta name="twitter:description" content="{{$description}}">
+	{{if .BingSiteVerificationID}}<meta name="msvalidate.01" content="{{.BingSiteVerificationID}}">{{end}}
 	<meta name="view-transition" content="same-origin">
 	<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 	<title>{{.Paper.Title}} - arXiv.gg</title>
 	{{if .StructuredData}}<script type="application/ld+json">{{.StructuredData}}</script>{{end}}
+	{{if .GoogleAnalyticsID}}<script>
+	(function() {
+		const analyticsID = '{{.GoogleAnalyticsID}}';
+		function loadAnalytics() {
+			if (window.__arxivAnalyticsLoaded) return;
+			window.__arxivAnalyticsLoaded = true;
+			window.dataLayer = window.dataLayer || [];
+			window.gtag = function(){ window.dataLayer.push(arguments); };
+			window.gtag('js', new Date());
+			window.gtag('config', analyticsID, { transport_type: 'beacon' });
+			const script = document.createElement('script');
+			script.async = true;
+			script.src = 'https://www.googletagmanager.com/gtag/js?id=' + analyticsID;
+			document.head.appendChild(script);
+		}
+		if (document.readyState === 'complete') setTimeout(loadAnalytics, 5000);
+		else window.addEventListener('load', () => setTimeout(loadAnalytics, 5000), { once: true });
+	})();
+	</script>{{end}}
 	<script>
 	(function() {
 		function hasMath(root) {
@@ -43,7 +63,9 @@
 				};
 				const script = document.createElement('script');
 				script.async = true;
-				script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js';
+				script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js';
+				script.integrity = 'sha384-AHAnt9ZhGeHIrydA1Kp1L7FN+2UosbF7RQg6C+9Is/a7kDpQ1684C2iH2VWil6r4';
+				script.crossOrigin = 'anonymous';
 				script.onerror = err => {
 					window.__arxivMathJaxReady = null;
 					reject(err);
@@ -74,7 +96,7 @@
 		else scheduleMathJax();
 	})();
 	</script>
-	<script src="https://d3js.org/d3.v7.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
 	<style>
 		/* View Transitions */
 		::view-transition-old(root) { animation: fade-out 0.2s ease-out; }
@@ -107,10 +129,12 @@
 		h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; view-transition-name: paper-hero; min-height: 2rem; }
 		h2 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25rem; min-height: 1.5rem; }
 
-		.nav { margin-bottom: 1.5rem; font-size: 0.875rem; min-height: 1.5rem; }
-		.nav a { margin-right: 1rem; }
-		.site-footer { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 0.78rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
-		.site-footer-separator { color: #94a3b8; }
+			.nav { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1.5rem; font-size: 0.875rem; min-height: 1.5rem; }
+			.nav form { display: inline; margin: 0; }
+			.nav-button { border: 0; background: transparent; color: #0066cc; padding: 0; font: inherit; cursor: pointer; }
+			.nav-button:hover { text-decoration: underline; }
+			.site-footer { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #e5e7eb; color: #64748b; font-size: 0.78rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+			.site-footer-separator { color: #94a3b8; }
 		.meta { font-size: 0.875rem; color: #64748b; margin-bottom: 0.5rem; min-height: 1.5rem; }
 		.meta code { font-family: monospace; background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; }
 			.authors { margin-bottom: 0.5rem; }
@@ -171,6 +195,21 @@
 			.btn-secondary { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
 			.btn-secondary:hover { background: #e2e8f0; color: #334155; }
 			.btn-icon { font-style: normal; }
+		.reader-cta {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 1rem;
+			align-items: center;
+			margin: 1.1rem 0 1.35rem;
+			border: 1px solid #bfdbfe;
+			border-left: 4px solid #2563eb;
+			border-radius: 8px;
+			padding: 0.9rem 1rem;
+			background: linear-gradient(135deg, #eff6ff 0%, #ffffff 72%);
+		}
+		.reader-cta h2 { min-height: 0; margin: 0; border: 0; padding: 0; color: #0f172a; font-size: 1rem; }
+		.reader-cta p { margin: 0.3rem 0 0; color: #475569; font-size: 0.84rem; line-height: 1.45; }
+		.reader-cta .btn { white-space: nowrap; }
 		.auto-fetch { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #64748b; margin-left: 0.25rem; }
 		.links { font-size: 0.875rem; margin-bottom: 1rem; }
 		.links a { margin-right: 1rem; }
@@ -195,7 +234,7 @@
 			.semantic-map-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: -0.25rem; }
 			.semantic-map-status { color: #64748b; font-size: 0.8rem; min-height: 1.25rem; }
 			.semantic-map-container { height: 460px; background: linear-gradient(180deg, #f8fafc 0%, #eef6ff 100%); overflow: hidden; }
-			.semantic-map-placeholder { padding: 2rem; color: #64748b; text-align: center; }
+			.semantic-map-status { padding: 2rem; color: #64748b; text-align: center; }
 			.semantic-map-link { stroke: #94a3b8; stroke-opacity: 0.32; stroke-width: 1.2px; }
 			.semantic-map-node { cursor: pointer; stroke: #fff; stroke-width: 1.5px; }
 			.semantic-map-node:hover { stroke: #111827; stroke-width: 2px; }
@@ -226,6 +265,10 @@
 		/* Loading - fixed dimensions prevent CLS when showing/hiding */
 		.loading { font-size: 0.8rem; color: #64748b; display: inline-block; min-width: 100px; vertical-align: middle; }
 		.loading::before { content: ""; display: inline-block; width: 10px; height: 10px; border: 2px solid #e2e8f0; border-top-color: #1d4ed8; border-radius: 50%; margin-right: 0.4rem; animation: spin 1s linear infinite; vertical-align: middle; }
+		.prefetch-done { color: #047857; }
+		.prefetch-done::before { display: none; }
+		.prefetch-error { color: #b91c1c; }
+		.prefetch-error::before { display: none; }
 		@keyframes spin { to { transform: rotate(360deg); } }
 		/* Status messages in action bar - use absolute positioning to prevent CLS */
 		.actions .loading { position: relative; }
@@ -298,11 +341,13 @@
 			.graph-container { height: 300px; }
 			.semantic-map-container { height: 360px; }
 			.refs li { padding: 0.75rem; }
+			.reader-cta { grid-template-columns: 1fr; }
+			.reader-cta .btn { width: 100%; justify-content: center; }
 		}
 	</style>
 </head>
 <body>
-<div class="nav"><a href="/">Home</a> | <a href="/categories">Categories</a> | <a href="/api/v1/">API</a> | <a href="/login">Sign in</a></div>
+{{template "nav" .}}
 
 <h1 data-mathjax>{{.Paper.Title}}</h1>
 <div class="meta">
@@ -320,6 +365,16 @@
 	<label class="auto-fetch helpable" data-help="Automatically prepare papers you open so related-work recommendations are ready."><input type="checkbox" id="auto-embed-toggle" aria-label="Auto-prepare papers"> Auto-prepare</label>
 	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer" aria-label="View on arxiv.org" data-help="Open the official arXiv abstract page."><i class="btn-icon" aria-hidden="true">↗</i> arxiv.org</a>
 </div>
+
+{{if not .CurrentUser}}
+<aside class="reader-cta" aria-labelledby="reader-cta-title">
+	<div>
+		<h2 id="reader-cta-title">Keep this paper in your research trail</h2>
+		<p>Create a free account to return to papers you opened, use Deep Search, and discover related work from your reading path.</p>
+	</div>
+	<a class="btn" href="/login?next={{urlquery (paperPath .Paper.ID)}}">Continue free</a>
+</aside>
+{{end}}
 <div class="terminal" id="embedding-terminal">
 	<div class="terminal-header">
 		<span class="terminal-dot red"></span>
@@ -339,25 +394,26 @@
 <h2>Citation Graph</h2>
 <div class="graph-container" id="graph-container">
 	<div class="graph-controls">
-		<button class="graph-btn" id="reset-btn" data-help="Reset zoom and graph position.">Reset</button>
-		<button class="graph-btn" id="fullscreen-btn" data-help="Expand the graph for easier exploration.">Fullscreen</button>
+		<button class="graph-btn" id="reset-btn" data-help="Reset zoom and graph position." disabled>Reset</button>
+		<button class="graph-btn" id="fullscreen-btn" data-help="Expand the graph for easier exploration." disabled>Fullscreen</button>
 	</div>
 	<div class="graph-legend">
 		<div class="legend-item helpable" tabindex="0" data-help="The page you are viewing now."><div class="legend-dot" style="background:#1d4ed8;"></div> This paper</div>
 		<div class="legend-item helpable" tabindex="0" data-help="Papers this paper cites."><div class="legend-dot" style="background:#334155;"></div> Reference</div>
 		<div class="legend-item helpable" tabindex="0" data-help="Cached papers that cite this paper."><div class="legend-dot" style="background:#10b981;"></div> Citing</div>
-		<div class="legend-item helpable" tabindex="0" data-help="Citation IDs we found but have not cached yet."><div class="legend-dot" style="background:#94a3b8;"></div> Uncached</div>
+		<div class="legend-item helpable" tabindex="0" data-help="Citation IDs found in references whose paper metadata is not cached locally."><div class="legend-dot" style="background:#94a3b8;"></div> Metadata not cached</div>
 	</div>
+	<p class="semantic-map-status" id="citation-graph-status" role="status">Loading citation graph...</p>
 </div>
 <div class="graph-tooltip" id="tooltip"></div>
 
-<h2>Related Work Map</h2>
+<h2 class="helpable" tabindex="0" data-help="Maps this paper against nearby papers using abstract-level semantic similarity.">Related Work Map</h2>
 <div class="semantic-map-toolbar">
-	<button class="graph-btn" id="semantic-map-load-btn" type="button" data-help="Show papers that discuss closely related ideas." {{if not .HasEmbedding}}disabled{{end}}>Find Similar</button>
-	<span class="semantic-map-status helpable" id="semantic-map-status" tabindex="0" data-help="Related-work maps need the paper prepared first." aria-live="polite">{{if .HasEmbedding}}Ready{{else}}Prepare paper first{{end}}</span>
+	<button class="graph-btn" id="semantic-map-load-btn" type="button" data-help="{{if .HasEmbedding}}Reload papers that discuss closely related ideas.{{else}}Show papers that discuss closely related ideas.{{end}}" {{if not .HasEmbedding}}disabled{{end}}>Find Similar</button>
+	<span class="semantic-map-status helpable" id="semantic-map-status" tabindex="0" data-help="{{if .HasEmbedding}}arXiv.gg is loading the related-work map automatically.{{else}}Related-work maps need the paper prepared first.{{end}}" aria-live="polite">{{if .HasEmbedding}}Loading map...{{else}}Prepare paper first{{end}}</span>
 </div>
 <div class="graph-container semantic-map-container" id="semantic-map-container">
-	<p class="semantic-map-placeholder">{{if .HasEmbedding}}Click Find Similar to map nearby papers.{{else}}Prepare this paper, then map nearby papers.{{end}}</p>
+	<p class="semantic-map-status">{{if .HasEmbedding}}Loading related work map...{{else}}Prepare this paper, then map nearby papers.{{end}}</p>
 </div>
 
 {{if .AlsoViewed}}
@@ -375,13 +431,13 @@
 {{end}}
 
 {{if .PaperList}}
-<h2>References{{if .UncachedCount}} <span class="loading" id="prefetch-status">Loading titles...</span>{{end}}</h2>
+	<h2 id="references-heading">References{{if and .LocalMode .UncachedCount}} <span class="loading" id="prefetch-status" role="status">Loading uncached metadata...</span>{{end}}</h2>
 <ul class="refs" id="refs-list">
 {{range .PaperList}}{{if .IsRef}}
 <li data-id="{{.ID}}">
 	<span class="ref-id">{{.ID}}</span>
 	{{if .Cached}}<a class="ref-title" href="{{paperPath .ID}}" data-mathjax>{{.Title}}</a> <span class="ref-date">({{arxivIDToDate .ID}})</span>{{if .Citations}} <span class="ref-meta">{{.Citations}} cites</span>{{end}}
-	{{else}}<span class="ref-uncached">{{.ID}}</span> <span class="ref-date">({{arxivIDToDate .ID}})</span> <a href="{{paperPath .ID}}">[open]</a>{{end}}
+		{{else}}<span class="ref-uncached">Metadata not cached</span> <span class="ref-date">({{arxivIDToDate .ID}})</span> <a href="{{paperPath .ID}}">[open]</a>{{end}}
 </li>
 {{end}}{{end}}
 </ul>
@@ -558,23 +614,28 @@
 
 	function refreshGraph() {
 		return fetch('/paper/' + paperID + '/graph')
-			.then(r => r.json())
+			.then(r => {
+				if (!r.ok) throw new Error('Citation graph request failed');
+				return r.json();
+			})
 			.then(data => {
+				const graphStatus = document.getElementById('citation-graph-status');
 				if (!data.nodes || data.nodes.length === 0) {
-					if (!graphInitialized) {
-						container.innerHTML = '<p style="padding:2rem;color:#64748b;text-align:center;">No citation data available.</p>';
-					}
+					if (graphStatus) graphStatus.textContent = 'No cached citation relationships are available for this paper.';
 					return;
 				}
+				if (graphStatus) graphStatus.remove();
+				document.getElementById('reset-btn').disabled = false;
+				document.getElementById('fullscreen-btn').disabled = false;
 
 				const width = container.clientWidth;
 				const height = container.clientHeight;
 
 				// First time: create SVG and setup
 				if (!graphInitialized) {
-					// Remove placeholder if present
-					const placeholder = container.querySelector('p');
-					if (placeholder) placeholder.remove();
+					// Remove the current status message before rendering results.
+					const statusMessage = container.querySelector('p');
+					if (statusMessage) statusMessage.remove();
 
 					svg = d3.select('#graph-container')
 						.append('svg')
@@ -709,18 +770,26 @@
 					document.querySelectorAll('.refs li[data-id="' + d.id + '"]').forEach(el => el.style.background = '');
 				});
 
-				simulation.on('tick', () => {
-					links.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-						 .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-					nodes.attr('cx', d => d.x).attr('cy', d => d.y);
-				});
+					simulation.on('tick', () => {
+						links.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+							 .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+						nodes.attr('cx', d => d.x).attr('cy', d => d.y);
+					});
+				})
+			.catch(err => {
+				const graphStatus = document.getElementById('citation-graph-status');
+				if (graphStatus) graphStatus.textContent = 'Could not load the citation graph. Reload the page to try again.';
+				console.error('Citation graph error:', err);
 			});
 	}
 
 	// Refresh references list from server
 	function refreshRefsList() {
 		return fetch('/paper/' + paperID + '/refs')
-			.then(r => r.json())
+			.then(r => {
+				if (!r.ok) throw new Error('Reference request failed');
+				return r.json();
+			})
 			.then(refs => {
 				// Merge refs into paperList for graph coloring, preserving citing flags
 				const byId = new Map();
@@ -750,7 +819,7 @@
 					if (r.hasTitle) {
 						li.innerHTML = '<span class="ref-id">' + escapeHtml(r.id) + '</span> <a class="ref-title" href="' + paperURL + '" data-mathjax>' + escapeHtml(r.title) + '</a>' + datePart + (r.citedBy ? ' <span class="ref-meta">' + escapeHtml(r.citedBy) + ' cites</span>' : '');
 					} else {
-						li.innerHTML = '<span class="ref-id">' + escapeHtml(r.id) + '</span> <span class="ref-uncached">' + escapeHtml(r.id) + '</span>' + datePart + ' <a href="' + paperURL + '">[open]</a>';
+						li.innerHTML = '<span class="ref-id">' + escapeHtml(r.id) + '</span> <span class="ref-uncached">Metadata not cached</span>' + datePart + ' <a href="' + paperURL + '">[open]</a>';
 					}
 					refsList.appendChild(li);
 				});
@@ -808,14 +877,20 @@
 			if (semanticMapLoadBtn) semanticMapLoadBtn.disabled = disabled;
 		}
 
+		function setSemanticMapStatus(text, help) {
+			if (!semanticMapStatus) return;
+			semanticMapStatus.textContent = text;
+			if (help) semanticMapStatus.dataset.help = help;
+		}
+
 		function enableSimilarButtons() {
 			setSimilarButtonsDisabled(false);
 			if (semanticMapStatus && semanticMapStatus.textContent.includes('Prepare')) {
-				semanticMapStatus.textContent = 'Ready';
+				setSemanticMapStatus('Ready', 'This paper is ready; arXiv.gg will try loading the related-work map automatically.');
 			}
-			const placeholder = semanticMapContainer?.querySelector('.semantic-map-placeholder');
-			if (placeholder && placeholder.textContent.includes('Prepare')) {
-				placeholder.textContent = 'Click Find Similar to map related papers.';
+			const statusMessage = semanticMapContainer?.querySelector('.semantic-map-status');
+			if (statusMessage && statusMessage.textContent.includes('Prepare')) {
+				statusMessage.textContent = 'Loading related work map...';
 			}
 		}
 
@@ -989,9 +1064,7 @@
 				});
 
 			const relatedCount = Math.max(0, mapNodes.length - 1);
-			if (semanticMapStatus) {
-				semanticMapStatus.textContent = `${relatedCount} papers · ${visibleClusters.length} clusters · embedding map`;
-			}
+			setSemanticMapStatus(`${relatedCount} papers · ${visibleClusters.length} clusters · embedding map`, 'Semantic neighbors grouped by topic; click a point to open that paper.');
 			semanticMapLoaded = true;
 		}
 
@@ -1164,23 +1237,21 @@
 							.attr('y', d => d.y);
 				});
 
-			if (semanticMapStatus) {
-				semanticMapStatus.textContent = `${resultNodes.length} related papers`;
-			}
+			setSemanticMapStatus(`${resultNodes.length} related papers`, 'Semantic neighbors for this paper; click a point to open that paper.');
 			semanticMapLoaded = true;
 		}
 
 		async function loadSemanticMap() {
 			if (!semanticMapContainer || semanticMapLoading) return;
 			if (!hasExistingEmbedding) {
-				if (semanticMapStatus) semanticMapStatus.textContent = 'Prepare paper first';
+				setSemanticMapStatus('Prepare paper first', 'Related-work maps need the paper prepared first.');
 				return;
 			}
 
 			semanticMapLoading = true;
 			setSimilarButtonsDisabled(true);
-			semanticMapContainer.innerHTML = '<p class="semantic-map-placeholder">Mapping related papers...</p>';
-			if (semanticMapStatus) semanticMapStatus.textContent = 'Loading...';
+			semanticMapContainer.innerHTML = '<p class="semantic-map-status">Mapping related papers...</p>';
+			setSemanticMapStatus('Loading...', 'Looking for nearby papers with prepared semantic profiles.');
 
 			try {
 				const response = await fetch(encodeURI('/api/v1/papers/' + paperID + '/similar?limit=80'));
@@ -1192,14 +1263,14 @@
 				semanticMapData = data.data?.map || null;
 				semanticMapModel = data.data?.model || '';
 				if (!semanticMapResults.length) {
-					semanticMapContainer.innerHTML = '<p class="semantic-map-placeholder">No related prepared papers found yet.</p>';
-					if (semanticMapStatus) semanticMapStatus.textContent = 'No matches';
+					semanticMapContainer.innerHTML = '<p class="semantic-map-status">No related prepared papers found yet.</p>';
+					setSemanticMapStatus('No matches', 'No prepared neighboring papers were returned for this paper yet.');
 					return;
 				}
 				renderSemanticMap(semanticMapResults, semanticMapModel, semanticMapData);
 			} catch (err) {
-				semanticMapContainer.innerHTML = '<p class="semantic-map-placeholder">Could not load related papers.</p>';
-				if (semanticMapStatus) semanticMapStatus.textContent = err.message;
+				semanticMapContainer.innerHTML = '<p class="semantic-map-status">Could not load related papers.</p>';
+				setSemanticMapStatus(err.message, 'The map did not load. Use Find Similar to try again.');
 			} finally {
 				semanticMapLoading = false;
 				if (hasExistingEmbedding) setSimilarButtonsDisabled(false);
@@ -1255,30 +1326,36 @@
 		terminalOutput.scrollTop = terminalOutput.scrollHeight;
 	}
 
-	function terminalWriteTyping(text, className = '', delay = 30) {
-		return new Promise(resolve => {
-			const line = document.createElement('div');
-			line.className = 'terminal-line' + (className ? ' ' + className : '');
-			terminalOutput.appendChild(line);
-			
-			let i = 0;
-			const cursor = document.createElement('span');
-			cursor.className = 'terminal-cursor';
-			line.appendChild(cursor);
-			
-			function type() {
-				if (i < text.length) {
-					line.insertBefore(document.createTextNode(text[i]), cursor);
-					i++;
-					terminalOutput.scrollTop = terminalOutput.scrollHeight;
-					setTimeout(type, delay);
-				} else {
-					cursor.remove();
-					resolve();
-				}
+	function sleep(milliseconds) {
+		return new Promise(resolve => setTimeout(resolve, milliseconds));
+	}
+
+	function markPaperPrepared() {
+		hasExistingEmbedding = true;
+		const status = document.getElementById('embedding-status');
+		if (status && !status.textContent.includes('ready')) {
+			status.innerHTML = ' · <span class="badge badge-embed helpable" tabindex="0" data-help="This paper is ready for idea search and related-work maps.">🧠 ready</span>';
+		}
+		embeddingBtn.innerHTML = '<i class="btn-icon" aria-hidden="true">🧠</i> Refresh Paper';
+		embeddingBtn.setAttribute('aria-label', 'Refresh this paper for related-work search');
+		enableSimilarButtons();
+		loadSemanticMap();
+	}
+
+	async function waitForPaperPreparation(statusURL) {
+		for (let attempt = 0; attempt < 40; attempt++) {
+			await sleep(3000);
+			const response = await fetch(statusURL, { cache: 'no-store' });
+			const data = await response.json();
+			if (!response.ok || !data.success) throw new Error(data.error || 'Could not check queued work');
+			const status = data.data?.status || {};
+			if (status.mapReady || status.abstractReady) return;
+			if ((status.failedJobs || 0) > 0 && (status.queuedJobs || 0) === 0 && (status.runningJobs || 0) === 0) {
+				throw new Error('Queued preparation failed. Try again to requeue it.');
 			}
-			type();
-		});
+			terminalWrite('Queued work: ' + (status.runningJobs || 0) + ' running, ' + (status.queuedJobs || 0) + ' waiting', 'output');
+		}
+		throw new Error('Preparation is still queued. You can leave this page and try again later.');
 	}
 
 	async function runEmbeddingGeneration() {
@@ -1289,14 +1366,8 @@
 		terminalOutput.innerHTML = '';
 		terminal.classList.add('active');
 		
-		await terminalWriteTyping('prepare related-work map for ' + paperID, 'prompt', 15);
-		await new Promise(r => setTimeout(r, 200));
-		
-		if (hasExistingEmbedding) {
-			terminalWrite('This paper was already prepared; refreshing...', 'info');
-			await new Promise(r => setTimeout(r, 150));
-		}
-		terminalWrite('Preparing recommendation profile...', 'info');
+		terminalWrite('Prepare related-work data for ' + paperID, 'prompt');
+		terminalWrite(hasExistingEmbedding ? 'Requesting a refresh...' : 'Requesting preparation...', 'info');
 		
 		try {
 			const response = await fetch('/api/v1/papers/' + paperID + '/embeddings', {
@@ -1305,39 +1376,20 @@
 			});
 			
 			const data = await response.json();
-			
-			await new Promise(r => setTimeout(r, 300));
-			terminalWrite('Related-work profile ready', 'output');
-			terminalWrite('Generator: ' + (data.data?.generator || 'recommendation-service'), 'output');
-			await new Promise(r => setTimeout(r, 200));
-			terminalWrite('Encoding: "' + (data.data?.paper?.Title || paperID).substring(0, 50) + '..."', 'output');
-			await new Promise(r => setTimeout(r, 400));
-			
-			if (data.success) {
-				terminalWrite('Paper is ready for idea search', 'output');
-				await new Promise(r => setTimeout(r, 150));
-				terminalWrite('Done! Similar papers are now available for ' + paperID, 'success');
-				hasExistingEmbedding = true;
-				const status = document.getElementById('embedding-status');
-				if (status && !status.textContent.includes('ready')) {
-					status.innerHTML = ' · <span class="badge badge-embed helpable" tabindex="0" data-help="This paper is ready for idea search and related-work maps.">🧠 ready</span>';
-				}
-					if (embeddingBtn) {
-						embeddingBtn.innerHTML = '<i class="btn-icon" aria-hidden="true">🧠</i> Refresh Paper';
-						embeddingBtn.setAttribute('aria-label', 'Refresh this paper for related-work search');
-					}
-					enableSimilarButtons();
-
-					setTimeout(() => {
-						terminal.classList.remove('active');
-					isGenerating = false;
-					embeddingBtn.disabled = false;
-				}, 3000);
-			} else {
-				throw new Error(data.error || 'Generation failed');
+			if (!response.ok || !data.success) throw new Error(data.error || 'Preparation request failed');
+			if (data.data?.generator) terminalWrite('Generator: ' + data.data.generator, 'output');
+			if (data.data?.queued) {
+				terminalWrite(data.data.message || 'Preparation queued.', 'info');
+				terminalWrite('Checking queue status every 3 seconds...', 'output');
+				await waitForPaperPreparation(data.data.statusUrl);
+			} else if (!Boolean(data.data?.mapReady ?? data.data?.hasEmbedding)) {
+				throw new Error('The request completed, but related-work data is not ready.');
 			}
+			terminalWrite('Paper is ready for idea search and related-work maps.', 'success');
+			markPaperPrepared();
 		} catch (err) {
-			terminalWrite('✗ Error: ' + err.message, 'error');
+			terminalWrite('Error: ' + err.message, 'error');
+		} finally {
 			isGenerating = false;
 			embeddingBtn.disabled = false;
 		}
@@ -1356,6 +1408,19 @@
 
 		if (semanticMapLoadBtn) {
 			semanticMapLoadBtn.addEventListener('click', loadSemanticMap);
+		}
+
+		function scheduleSemanticMapAutoload() {
+			if (!hasExistingEmbedding || !semanticMapContainer) return;
+			const start = () => {
+				if (semanticMapLoaded || semanticMapLoading) return;
+				loadSemanticMap();
+			};
+			if ('requestIdleCallback' in window) {
+				window.requestIdleCallback(start, { timeout: 1200 });
+			} else {
+				setTimeout(start, 350);
+			}
 		}
 
 		window.addEventListener('resize', () => {
@@ -1380,24 +1445,29 @@
 
 	// Initial graph load
 	refreshGraph();
+	scheduleSemanticMapAutoload();
 
 	// Prefetch reference titles and update list
 	// Shows loading indicator, calls prefetch endpoint, then refreshes refs list
 	function prefetchAndRefresh() {
 		// Show loading indicator
-		const refsHeader = document.querySelector('h2');
+		const refsHeader = document.getElementById('references-heading');
 		let status = document.getElementById('prefetch-status');
 		if (!status && refsHeader && refsHeader.textContent.includes('References')) {
 			status = document.createElement('span');
 			status.id = 'prefetch-status';
 			status.className = 'loading';
-			status.textContent = ' Loading titles...';
+			status.setAttribute('role', 'status');
+			status.textContent = ' Loading uncached metadata...';
 			refsHeader.appendChild(status);
 		}
 
 		// Call prefetch (synchronous - waits for all titles)
 		return fetch('/paper/' + paperID + '/prefetch-refs', { method: 'POST' })
-			.then(r => r.json())
+			.then(r => {
+				if (!r.ok) throw new Error('Reference metadata request failed');
+				return r.json();
+			})
 			.then(() => {
 				// Prefetch done - refresh refs list to show titles
 				return refreshRefsList();
@@ -1405,12 +1475,18 @@
 			.then(() => {
 				refreshGraph();
 				const s = document.getElementById('prefetch-status');
-				if (s) s.remove();
+				if (s) {
+					s.className = 'prefetch-done';
+					s.textContent = 'Reference metadata refreshed.';
+				}
 			})
 			.catch(err => {
 				console.error('Prefetch error:', err);
 				const s = document.getElementById('prefetch-status');
-				if (s) s.remove();
+				if (s) {
+					s.className = 'prefetch-error';
+					s.textContent = 'Reference metadata could not be loaded.';
+				}
 			});
 	}
 
@@ -1421,23 +1497,37 @@
 
 	{{if .FetchingSource}}
 	// Poll for source download completion
+	let sourcePollAttempts = 0;
 	const sourcePoller = setInterval(() => {
+		sourcePollAttempts++;
+		if (sourcePollAttempts > 60) {
+			clearInterval(sourcePoller);
+			const sourceStatus = document.getElementById('source-status');
+			if (sourceStatus) sourceStatus.textContent = 'Source processing is taking longer than expected. Reload later to check again.';
+			return;
+		}
 		fetch('/paper/' + paperID + '/status')
-			.then(r => r.json())
+			.then(r => {
+				if (!r.ok) throw new Error('Paper status request failed');
+				return r.json();
+			})
 			.then(status => {
-				if (status.sourceDownloaded) {
-					clearInterval(sourcePoller);
-					// Remove the source loading indicator
-					const sourceStatus = document.getElementById('source-status');
+				if (!status.sourceDownloaded) return;
+				clearInterval(sourcePoller);
+				const sourceStatus = document.getElementById('source-status');
+				if (sourceStatus) sourceStatus.textContent = 'Source downloaded. Refreshing references...';
+				return refreshRefsList().then(() => {
+					refreshGraph();
+					return prefetchAndRefresh();
+				}).then(() => {
 					if (sourceStatus) sourceStatus.remove();
-
-					// Refresh refs list to show extracted citations, then prefetch titles
-					refreshRefsList().then(() => {
-						refreshGraph();
-						// Now prefetch titles for the newly extracted references
-						prefetchAndRefresh();
-					});
-				}
+				});
+			})
+			.catch(err => {
+				clearInterval(sourcePoller);
+				const sourceStatus = document.getElementById('source-status');
+				if (sourceStatus) sourceStatus.textContent = 'Could not refresh source or reference status. Reload to try again.';
+				console.error('Source status error:', err);
 			});
 	}, 2000);
 	{{end}}

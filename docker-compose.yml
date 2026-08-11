@@ -1,12 +1,12 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
-    container_name: arxiv-postgres
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-arxiv}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
       POSTGRES_DB: ${POSTGRES_DB:-arxiv}
     volumes:
+      - ${ARXIV_SECRETS_DIR:?ARXIV_SECRETS_DIR is required}/postgres-password:/run/secrets/postgres-password:ro
       - arxiv_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-arxiv} -d $${POSTGRES_DB:-arxiv}"]
@@ -21,13 +21,15 @@ services:
       args:
         BUILD_DATE: ${BUILD_DATE:-}
         BUILD_COMMIT: ${BUILD_COMMIT:-}
-    container_name: arxiv-container
     user: "1000:1000"
     init: true
     ports:
       - "127.0.0.1:80:8080"
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_URL_FILE: /run/secrets/database-url
+      ADMIN_TOKEN_FILE: /run/secrets/admin-token
+      QWEN_WORKER_TOKEN_FILE: /run/secrets/qwen-worker-token
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google-client-secret
       ARXIV_CACHE: /data/arxiv
       PORT: 8080
       HOME: /home/arxiv
@@ -35,23 +37,30 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /data/arxiv/sentence-transformers
       TRANSFORMERS_CACHE: /data/arxiv/huggingface/transformers
       PYTHONDONTWRITEBYTECODE: "1"
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN is required}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
-      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
-      INDEXNOW_KEY: ${INDEXNOW_KEY:-34af0c26368622541e3ca8aa555c3ad7}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      INDEXNOW_KEY: ${INDEXNOW_KEY:?INDEXNOW_KEY is required}
+      INDEXNOW_QUEUE_FILE: /data/arxiv/indexnow-urls
       ARXIV_OFFICIAL_TOTAL_PAPERS: ${ARXIV_OFFICIAL_TOTAL_PAPERS:-3045638}
       ARXIV_OFFICIAL_TOTAL_PAPERS_AS_OF: ${ARXIV_OFFICIAL_TOTAL_PAPERS_AS_OF:-2026-05-16}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-https://arxiv.gg/auth/google/callback}
-      QWEN_EMBEDDING_SERVICE_URL: ${QWEN_EMBEDDING_SERVICE_URL:-http://172.19.0.1:8010}
+      GOOGLE_ANALYTICS_ID: ${GOOGLE_ANALYTICS_ID:-}
+      BING_SITE_VERIFICATION_ID: ${BING_SITE_VERIFICATION_ID:-}
+      SITE_URL: ${SITE_URL:-https://arxiv.gg}
+      QWEN_EMBEDDING_SERVICE_URL: ${QWEN_EMBEDDING_SERVICE_URL:-}
+      QWEN_ASYNC_WORKER_ENABLED: ${QWEN_ASYNC_WORKER_ENABLED:-false}
       ARXIV_DB_MAX_OPEN_CONNS: ${ARXIV_DB_MAX_OPEN_CONNS:-30}
       ARXIV_DB_MAX_IDLE_CONNS: ${ARXIV_DB_MAX_IDLE_CONNS:-10}
       ARXIV_DETAIL_CACHE_SIZE: ${ARXIV_DETAIL_CACHE_SIZE:-20000}
       ARXIV_AUTHOR_QUERY_CONCURRENCY: ${ARXIV_AUTHOR_QUERY_CONCURRENCY:-4}
       ARXIV_CITATION_QUERY_CONCURRENCY: ${ARXIV_CITATION_QUERY_CONCURRENCY:-4}
     volumes:
-      - /data/arxiv:/data/arxiv
+      - ${ARXIV_DATA_DIR:-/data/arxiv}:/data/arxiv
+      - ${ARXIV_SECRETS_DIR}/database-url:/run/secrets/database-url:ro
+      - ${ARXIV_SECRETS_DIR}/admin-token:/run/secrets/admin-token:ro
+      - ${ARXIV_SECRETS_DIR}/qwen-worker-token:/run/secrets/qwen-worker-token:ro
+      - ${ARXIV_SECRETS_DIR}/google-client-secret:/run/secrets/google-client-secret:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=512m
     read_only: true
@@ -76,5 +85,5 @@ volumes:
 
 networks:
   default:
-    name: arxiv-network
+    name: ${ARXIV_NETWORK_NAME:?ARXIV_NETWORK_NAME is required}
     external: true

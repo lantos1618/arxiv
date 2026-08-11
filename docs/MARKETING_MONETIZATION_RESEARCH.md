@@ -1,5 +1,7 @@
 # arxiv.gg Marketing And Monetization Research
 
+> **ARCHIVED RESEARCH SNAPSHOT — NO CURRENT OFFER OR ROADMAP AUTHORITY.** This document preserves exploratory positioning and pricing research from its original review period. It does not announce plans, prices, paid tiers, entitlement, revenue, or product commitments. Current capabilities and the conditional feedback-offer terms are documented in `README.md`.
+
 Status: research draft / maybe plan  
 Date: 2026-05-16
 

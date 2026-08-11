@@ -1,6 +1,9 @@
 # Cache data
 data/
 .env
+.secrets/
+*.pem
+*.key
 
 # Python cache
 tools/__pycache__/

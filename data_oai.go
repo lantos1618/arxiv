@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,6 +34,34 @@ func NewOAIClient() *OAIClient {
 // If resumptionToken is empty, starts from the beginning with the given params.
 // If resumptionToken is non-empty, continues from that point.
 func (c *OAIClient) ListRecords(ctx context.Context, set string, from, until time.Time, resumptionToken string) (*OAIResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		response, retryAfter, err := c.listRecordsOnce(ctx, set, from, until, resumptionToken)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if retryAfter < 0 || attempt == 3 {
+			break
+		}
+		if retryAfter == 0 {
+			retryAfter = time.Duration(1<<attempt) * time.Second
+		}
+		if retryAfter > 30*time.Second {
+			retryAfter = 30 * time.Second
+		}
+		timer := time.NewTimer(retryAfter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *OAIClient) listRecordsOnce(ctx context.Context, set string, from, until time.Time, resumptionToken string) (*OAIResponse, time.Duration, error) {
 	params := url.Values{}
 	params.Set("verb", "ListRecords")
 
@@ -54,36 +83,38 @@ func (c *OAIClient) ListRecords(ctx context.Context, set string, from, until tim
 	reqURL := c.baseURL + "?" + params.Encode()
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, -1, fmt.Errorf("create request: %w", err)
 	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
+		if ctx.Err() != nil {
+			return nil, -1, ctx.Err()
+		}
+		return nil, 0, fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		// arXiv rate limiting - should retry after delay
-		return nil, fmt.Errorf("rate limited (503)")
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode >= 500 {
+		return nil, parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()), fmt.Errorf("temporary OAI status: %s", resp.Status)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
+		return nil, -1, fmt.Errorf("unexpected status: %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, 0, fmt.Errorf("read body: %w", err)
 	}
 
 	var oaiResp oaiPMHResponse
 	if err := xml.Unmarshal(body, &oaiResp); err != nil {
-		return nil, fmt.Errorf("parse xml: %w", err)
+		return nil, 0, fmt.Errorf("parse xml: %w", err)
 	}
 
 	if oaiResp.Error.Code != "" {
-		return nil, fmt.Errorf("oai error %s: %s", oaiResp.Error.Code, oaiResp.Error.Value)
+		return nil, -1, fmt.Errorf("oai error %s: %s", oaiResp.Error.Code, oaiResp.Error.Value)
 	}
 
 	result := &OAIResponse{
@@ -93,6 +124,15 @@ func (c *OAIClient) ListRecords(ctx context.Context, set string, from, until tim
 	}
 
 	for _, rec := range oaiResp.ListRecords.Records {
+		if rec.Header.Status == "deleted" {
+			if id := oaiPaperID(rec.Header.Identifier); id != "" {
+				result.DeletedPaperIDs = append(result.DeletedPaperIDs, id)
+			}
+			continue
+		}
+		if strings.TrimSpace(rec.Metadata.ArXiv.ID) == "" {
+			continue
+		}
 		paper := Paper{
 			ID:         rec.Metadata.ArXiv.ID,
 			Title:      strings.TrimSpace(rec.Metadata.ArXiv.Title),
@@ -117,12 +157,43 @@ func (c *OAIClient) ListRecords(ctx context.Context, set string, from, until tim
 		result.Papers = append(result.Papers, paper)
 	}
 
-	return result, nil
+	result.RecordCount = len(result.Papers) + len(result.DeletedPaperIDs)
+	return result, -1, nil
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		if delay := retryAt.Sub(now); delay > 0 {
+			return delay
+		}
+	}
+	return 0
+}
+
+func oaiPaperID(identifier string) string {
+	const prefix = "oai:arXiv.org:"
+	identifier = strings.TrimSpace(identifier)
+	if strings.HasPrefix(identifier, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(identifier, prefix))
+	}
+	return ""
 }
 
 // OAIResponse contains the parsed response from an OAI-PMH ListRecords request.
 type OAIResponse struct {
 	Papers           []Paper
+	DeletedPaperIDs  []string
+	RecordCount      int
 	ResumptionToken  string
 	CompleteListSize int
 	Cursor           int
@@ -171,6 +242,7 @@ type oaiRecord struct {
 
 type oaiHeader struct {
 	Identifier string   `xml:"identifier"`
+	Status     string   `xml:"status,attr"`
 	Datestamp  string   `xml:"datestamp"`
 	SetSpec    []string `xml:"setSpec"`
 }

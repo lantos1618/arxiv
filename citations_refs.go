@@ -3,6 +3,7 @@ package arxiv
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,16 +42,24 @@ var arxivIDPatterns = []*regexp.Regexp{
 // ExtractReferences extracts arXiv paper IDs from .bbl, .bib, and .tex files in the source directory.
 // Falls back to PDF extraction using pdftotext if no refs found in text files.
 func ExtractReferences(srcPath string) []string {
+	refs, _ := extractReferences(srcPath)
+	return refs
+}
+
+func extractReferences(srcPath string) ([]string, error) {
 	if srcPath == "" {
-		return nil
+		return nil, nil
 	}
 
 	seen := make(map[string]bool)
 	var refs []string
 	var pdfFiles []string
 
-	filepath.WalkDir(srcPath, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	err := filepath.WalkDir(srcPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 
@@ -63,7 +72,10 @@ func ExtractReferences(srcPath string) []string {
 			return nil
 		}
 
-		ids := extractFromFile(path)
+		ids, err := extractFromFile(path)
+		if err != nil {
+			return err
+		}
 		for _, id := range ids {
 			// Normalize: strip version suffix for deduplication
 			normalized := normalizeArxivID(id)
@@ -74,24 +86,28 @@ func ExtractReferences(srcPath string) []string {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("walk source: %w", err)
+	}
 
 	// Fallback: if no refs found in text files, try PDFs
 	if len(refs) == 0 && len(pdfFiles) > 0 {
 		refs = extractFromPDFs(pdfFiles, seen)
 	}
 
-	return refs
+	return refs, nil
 }
 
-func extractFromFile(path string) []string {
+func extractFromFile(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer f.Close()
 
 	var ids []string
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		for _, pat := range arxivIDPatterns {
@@ -103,7 +119,10 @@ func extractFromFile(path string) []string {
 			}
 		}
 	}
-	return ids
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // extractFromPDFs uses pdftotext to extract text from PDF files and find arXiv IDs.

@@ -1,0 +1,7 @@
+2026-05-15-author-trigram-index.sql
+2026-05-15-category-list-indexes.sql
+2026-05-29-papers-categories-reindex.sql
+2026-05-29-qwen-abstract-hnsw-index.sql
+2026-05-29-qwen-chunk-hnsw-index.sql
+2026-05-31-admin-dashboard-indexes.sql
+2026-07-11-qwen-vector-not-null.sql

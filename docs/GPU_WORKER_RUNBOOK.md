@@ -1,119 +1,120 @@
 # GPU Worker Runbook
 
-Use this when a separate GPU box is ready for Qwen embedding work. The app and
-Postgres stay on the main arxiv.gg box; the GPU box only runs the embedding
-HTTP service.
+This runbook operates the current Qwen semantic pipeline. Keep PostgreSQL on the application host; GPU workers receive bounded text jobs and return vectors through an authenticated API or access PostgreSQL only for an explicitly controlled batch backfill.
 
-## 1. Prepare The GPU Box
+## 1. Preconditions
+
+- `QWEN_WORKER_TOKEN` is set on the application and delivered to workers through a secret file/volume when possible.
+- The app is reachable over a private or TLS-protected path.
+- PostgreSQL has pgvector and the current schema/indexes.
+- `deploy/sql/2026-07-11-qwen-vector-not-null.sql` has been reviewed, invalid NULL-vector rows have been cleaned, and the migration has been applied.
+- GPU image/runtime supports `Qwen/Qwen3-Embedding-8B` and the selected dtype.
+
+Never pass worker tokens in a URL. Avoid process arguments; `tools/run_ovh_qwen_worker.sh` prefers `QWEN_OVH_TOKEN_VOLUME` and `ARXIV_WORKER_TOKEN_FILE`.
+
+Set `QWEN_ASYNC_WORKER_ENABLED=true` in the app deployment only after the queue worker or orchestrator is installed, monitored, and able to claim jobs. Leave it false when the worker is stopped; this hides Semantic Search and prevents orphaned query jobs.
+
+## 2. Local Service
+
+From the repository root:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y git python3-venv python3-pip
-git clone https://github.com/lantos1618/arxiv.gg.git ~/arxiv-embedding-worker
-cd ~/arxiv-embedding-worker
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r tools/requirements.txt
-```
+python3 -m venv .venv-qwen
+. .venv-qwen/bin/activate
+pip install -r requirements-qwen-worker.txt
 
-Start the service on the GPU box:
-
-```bash
-cd ~/arxiv-embedding-worker
-source .venv/bin/activate
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export QWEN_EMBEDDING_DEVICE=cuda
+export QWEN_EMBEDDING_DTYPE=bfloat16
 export QWEN_MAX_BATCH_SIZE=128
-export QWEN_MAX_TEXT_CHARS=4096
-QWEN_EMBEDDING_DEVICE=cuda \
+export QWEN_MAX_TEXT_CHARS=24000
 uvicorn tools.qwen_embedding_service:app --host 127.0.0.1 --port 8010
 ```
 
-Health check on the GPU box:
+Validate service health before starting database work:
 
 ```bash
-curl http://127.0.0.1:8010/health
+curl -fsS http://127.0.0.1:8010/health
 ```
 
-## 2. Attach It To The App Box
+Use the exact repository-root module path shown above.
 
-From the arxiv.gg app box, open an SSH tunnel:
+## 3. Authenticated API Worker
+
+The preferred remote pattern claims fenced `query` and `abstract` jobs from the application:
 
 ```bash
-ssh -N -L 8010:127.0.0.1:8010 ubuntu@GPU_HOST
+export ARXIV_API_BASE='https://arxiv.gg/api/v1'
+export ARXIV_WORKER_TOKEN_FILE='/run/secrets/QWEN_WORKER_TOKEN'
+export QWEN_JOB_KINDS='query,abstract'
+export QWEN_JOB_WORKER_NAME="gpu-$(hostname)"
+python3 tools/qwen_api_worker.py \
+  --limit 32 \
+  --claim-size 1 \
+  --batch-size 1 \
+  --lease-seconds 900
 ```
 
-Then verify the app box can reach the GPU service:
+The worker loads the model before claiming, renews active leases, returns lease owner/generation/source hash, and resolves ambiguous completion responses before reporting failure. Multiple workers are safe only when all preserve this fencing protocol.
+
+## 4. On-Demand OVH Worker
+
+Configure a mounted secret volume where possible:
 
 ```bash
-curl http://127.0.0.1:8010/health
+export QWEN_OVH_TOKEN_VOLUME='my-secret-volume@GRA:/run/secrets:ro'
+export QWEN_OVH_TOKEN_FILE='/run/secrets/QWEN_WORKER_TOKEN'
+export QWEN_OVH_LIMIT=32
+export QWEN_OVH_KINDS='query,abstract'
+tools/run_ovh_qwen_worker.sh
 ```
 
-For a long-running tunnel, put the SSH command behind `systemd` or `autossh`.
+`tools/qwen_jit_orchestrator.sh` uses a non-blocking file lock to prevent duplicate local orchestrators from launching the same burst. Run it through `deploy/qwen-jit-orchestrator.service` or one equivalent supervisor, not several unsynchronized copies.
 
-## 3. Run Abstract Embeddings
+## 5. Abstract Backfill
 
-From the arxiv.gg app box:
+Queue a bounded set, then launch bounded workers:
 
 ```bash
-cd /home/ubuntu/arxiv
-source .venv/bin/activate
+QWEN_QUEUE_LIMIT=2048 QWEN_QUEUE_PRIORITY=10 \
+  tools/qwen_queue_abstract_backfill.sh
+
+QWEN_BACKFILL_TOTAL=2048 QWEN_BACKFILL_WORKERS=1 \
+  tools/run_qwen_abstract_backfill_batch.sh
+```
+
+For a directly connected private GPU service, `tools/qwen_embeddings_v2.py` is also available. Verify `DATABASE_URL` points to the intended PostgreSQL database before running any direct backfill.
+
+## 6. Full-Paper Pipeline
+
+Run extraction, chunking, then vectorization:
+
+```bash
+python3 tools/fetch_full_paper_text.py --limit 100
+python3 tools/chunk_full_papers.py --limit 1000
 QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
-python3 tools/qwen_embeddings_v2.py --limit 700000 --batch-size 128
+python3 tools/qwen_chunk_embeddings_v2.py --limit 10000 --batch-size 16
 ```
 
-This writes Qwen 1024d abstract vectors into `embeddings_v2` and does not touch
-the existing production MiniLM embeddings.
+Deep Search covers only papers whose current PDF text was chunked and whose chunk vectors match current text hashes. Keep chunk overlap below chunk size. Respect arXiv request rates and storage limits.
 
-The backfill script retries transient service failures and splits oversized
-batches recursively. A single CUDA OOM should shrink the work unit instead of
-killing the whole run.
-
-## 4. Run Full-Body Search Prep
-
-First chunk extracted paper text on the app/DB box:
-
-```bash
-cd /home/ubuntu/arxiv
-source .venv/bin/activate
-python3 tools/chunk_full_papers.py --limit 100000 --select-batch-size 200
-```
-
-Use `--refresh-existing` after changing chunk size or text extraction. The
-chunker removes stale chunk rows and their old vectors, and the embedder
-refreshes vectors when a chunk's `text_hash` changes.
-
-Then embed those chunks through the GPU service:
+## 7. Validation
 
 ```bash
 QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
-python3 tools/qwen_chunk_embeddings_v2.py --limit 500000 --batch-size 16
+python3 tools/qwen_pipeline_check.py \
+  --scope both --window-minutes 15 --min-recent 1
+
+curl --get 'https://arxiv.gg/api/v1/search/semantic' \
+  --data-urlencode 'q=representation learning'
 ```
 
-Full-body search is available after sign-in and free while we test it.
+Confirm:
 
-## 5. Pipeline Checks
+- vectors are non-NULL and 1,024-dimensional;
+- model/scope/source hashes are current;
+- semantic responses identify Qwen or explicitly mark Quick fallback;
+- leases are renewed and stale workers receive conflicts;
+- failed jobs retain bounded retry/error state;
+- no token appears in process listings or logs.
 
-Run a manual check from the app box:
-
-```bash
-cd /home/ubuntu/arxiv
-QWEN_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010 \
-python3 tools/qwen_pipeline_check.py --scope both --window-minutes 15 --min-recent 1
-```
-
-For systemd or cron, run the same command every few minutes and alert on a
-non-zero exit. Use `--scope abstract` when only the abstract backfill is
-expected to be moving; use `--scope chunks` when full-paper chunks are queued.
-
-The check fails when the GPU service is not ready or when pending rows exist but
-no new vectors were written in the selected window.
-
-## 6. Operational Notes
-
-- Keep Postgres on the main app box. Do not copy or replace the production DB.
-- Keep the GPU service bound to `127.0.0.1`; expose it only through SSH or a
-  private network.
-- Start with small limits, check DB growth and query speed, then scale up.
-- If the tunnel dies, backfill scripts will fail safely; restart the tunnel and
-  rerun the same command.
+Stop workers before changing model, dimension, text construction, or schema. Those changes require a new compatibility/backfill plan rather than silently mixing vectors.

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""
-Generate embeddings for arXiv papers using sentence-transformers.
+"""Archived offline migration utility for legacy MiniLM vectors.
+
+Qwen is the canonical embedding model. This utility is excluded from production
+images and requires ALLOW_LEGACY_MINILM_MIGRATION=1 before it will run.
 
 Usage:
     python3 generate_embeddings.py <cache_dir> [--model MODEL] [--limit N] [--batch-size N]
@@ -14,6 +16,12 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
+
+if os.environ.get("ALLOW_LEGACY_MINILM_MIGRATION") != "1":
+    raise SystemExit(
+        "legacy MiniLM generation is archived; set "
+        "ALLOW_LEGACY_MINILM_MIGRATION=1 only for an offline migration"
+    )
 
 import numpy as np
 from sentence_transformers import SentenceTransformer

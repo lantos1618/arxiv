@@ -38,11 +38,13 @@ def ensure_schema(conn):
                 token_estimate integer DEFAULT 0,
                 created timestamptz DEFAULT now(),
                 updated timestamptz DEFAULT now(),
-                vector vector(1024),
+                vector vector(1024) NOT NULL,
                 PRIMARY KEY (chunk_id, model, dim)
             )
             """
         )
+        cur.execute("DELETE FROM chunk_embeddings_v2 WHERE vector IS NULL")
+        cur.execute("ALTER TABLE chunk_embeddings_v2 ALTER COLUMN vector SET NOT NULL")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_v2_lookup "
             "ON chunk_embeddings_v2(model, dim, chunk_id)"
@@ -68,6 +70,7 @@ def fetch_chunks(conn, model, dim, scope, limit, order):
           ON e.chunk_id = c.id
          AND e.model = %s
          AND e.dim = %s
+         AND e.vector IS NOT NULL
         WHERE c.scope = %s
           AND COALESCE(c.text, '') <> ''
           AND (
@@ -83,15 +86,16 @@ def fetch_chunks(conn, model, dim, scope, limit, order):
 
 
 def store_batch(conn, rows, embeddings, model, dim):
+    if len(rows) != len(embeddings):
+        raise ValueError(f"received {len(embeddings)} embeddings for {len(rows)} rows")
     payload = []
     for (chunk_id, text, stored_hash, text_chars, token_estimate, _reason), embedding in zip(rows, embeddings):
         text = normalize_text(text)
         row_hash = stored_hash or source_hash(text)
-        try:
-            vector = vector_literal(embedding)
-        except (TypeError, ValueError) as err:
-            print(f"store invalid embedding marker chunk_id={chunk_id}: {err}", flush=True)
-            vector = None
+        if embedding is None or len(embedding) != dim:
+            actual_dim = 0 if embedding is None else len(embedding)
+            raise ValueError(f"chunk {chunk_id} embedding has dim={actual_dim}; want {dim}")
+        vector = vector_literal(embedding)
         payload.append(
             (
                 chunk_id,

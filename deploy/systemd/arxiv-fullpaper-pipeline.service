@@ -1,0 +1,18 @@
+[Unit]
+Description=Fetch, chunk, and Qwen-embed arXiv full papers
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+Environment=ARXIV_REPOSITORY=/opt/arxiv
+EnvironmentFile=-/etc/arxiv/fullpaper-pipeline.env
+ExecStart=/bin/sh -c 'cd "$ARXIV_REPOSITORY" && exec tools/fullpaper_pipeline.sh'
+User=arxiv
+Group=docker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run
+TimeoutStartSec=2h

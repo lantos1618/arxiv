@@ -1,0 +1,28 @@
+[Unit]
+Description=arxiv.gg Qwen JIT OVH worker launcher
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=arxiv
+Group=docker
+Environment=ARXIV_REPOSITORY=/opt/arxiv
+RuntimeDirectory=arxiv-qwen
+Environment=QWEN_JIT_INTERVAL_SECONDS=20
+Environment=QWEN_JIT_MAX_LIMIT=8
+Environment=QWEN_JIT_CLAIM_SIZE=1
+Environment=QWEN_JIT_BATCH_SIZE=1
+Environment=QWEN_JIT_KINDS=query,abstract
+Environment=QWEN_JIT_TIMEOUT=20m
+Environment=QWEN_JIT_LOCK_FILE=/run/arxiv-qwen/orchestrator.lock
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/arxiv/qwen-jit.env
+ExecStart=/bin/sh -c 'cd "$ARXIV_REPOSITORY" && exec tools/qwen_jit_orchestrator.sh'
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -164,10 +164,17 @@ def claim_candidates(conn, limit, categories, max_attempts, stale_processing_min
             status = 'processing',
             attempts = full_paper_fetch_status.attempts + 1,
             updated_at = now()
+        WHERE full_paper_fetch_status.status <> 'fetched'
+          AND full_paper_fetch_status.attempts < %s
+          AND COALESCE(full_paper_fetch_status.next_attempt_at, now()) <= now()
+          AND (
+              full_paper_fetch_status.status <> 'processing'
+              OR full_paper_fetch_status.updated_at < now() - (%s * interval '1 minute')
+          )
         RETURNING paper_id, attempts
     """
     with conn.cursor() as cur:
-        cur.execute(query, params)
+        cur.execute(query, params + [max_attempts, stale_processing_minutes])
         rows = [Candidate(row[0], row[1]) for row in cur.fetchall()]
     conn.commit()
     return rows
@@ -237,17 +244,26 @@ def extract_text(pdf_path, timeout, max_text_chars):
     return text
 
 
-def mark_fetched(conn, paper_id, pdf_url, pdf_bytes, text):
-    with conn.cursor() as cur:
-        cur.execute(
+def mark_fetched(conn, paper_id, attempts, pdf_url, pdf_bytes, text):
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
             """
             UPDATE papers
             SET pdf_text = %s
             WHERE id = %s
+              AND EXISTS (
+                  SELECT 1 FROM full_paper_fetch_status s
+                  WHERE s.paper_id = papers.id
+                    AND s.status = 'processing'
+                    AND s.attempts = %s
+              )
             """,
-            (text, paper_id),
+            (text, paper_id, attempts),
         )
-        cur.execute(
+            if cur.rowcount != 1:
+                raise FetchError(f"claim lost before storing {paper_id}")
+            cur.execute(
             """
             UPDATE full_paper_fetch_status
             SET status = 'fetched',
@@ -259,10 +275,13 @@ def mark_fetched(conn, paper_id, pdf_url, pdf_bytes, text):
                 next_attempt_at = NULL,
                 updated_at = now()
             WHERE paper_id = %s
+              AND status = 'processing'
+              AND attempts = %s
             """,
-            (pdf_url, pdf_bytes, len(text), paper_id),
+            (pdf_url, pdf_bytes, len(text), paper_id, attempts),
         )
-    conn.commit()
+            if cur.rowcount != 1:
+                raise FetchError(f"claim lost before completing {paper_id}")
 
 
 def retry_delay(attempts, status_code):
@@ -279,8 +298,9 @@ def mark_failed(conn, paper_id, attempts, error, status_code, pdf_url):
     if len(message) > 1000:
         message = message[:1000]
     delay = retry_delay(attempts, status_code)
-    with conn.cursor() as cur:
-        cur.execute(
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
             """
             UPDATE full_paper_fetch_status
             SET status = 'failed',
@@ -290,10 +310,11 @@ def mark_failed(conn, paper_id, attempts, error, status_code, pdf_url):
                 next_attempt_at = now() + %s::interval,
                 updated_at = now()
             WHERE paper_id = %s
+              AND status = 'processing'
+              AND attempts = %s
             """,
-            (message, status_code, pdf_url, delay, paper_id),
+            (message, status_code, pdf_url, delay, paper_id, attempts),
         )
-    conn.commit()
 
 
 def fetch_one(conn, candidate, args):
@@ -308,7 +329,7 @@ def fetch_one(conn, candidate, args):
         )
         text = extract_text(pdf_path, args.extract_timeout, args.max_text_chars)
         if not args.dry_run:
-            mark_fetched(conn, candidate.paper_id, pdf_url, pdf_bytes, text)
+            mark_fetched(conn, candidate.paper_id, candidate.attempts, pdf_url, pdf_bytes, text)
         print(
             f"fetched {candidate.paper_id} bytes={pdf_bytes} text_chars={len(text)}",
             flush=True,
@@ -344,6 +365,14 @@ def main():
 
     if args.limit <= 0:
         raise SystemExit("--limit must be positive")
+    if args.max_attempts <= 0 or args.stale_processing_minutes <= 0:
+        raise SystemExit("--max-attempts and --stale-processing-minutes must be positive")
+    if args.rate_limit_seconds < 0:
+        raise SystemExit("--rate-limit-seconds must be non-negative")
+    if args.fetch_timeout <= 0 or args.extract_timeout <= 0:
+        raise SystemExit("--fetch-timeout and --extract-timeout must be positive")
+    if args.max_pdf_bytes <= 0 or args.max_text_chars <= 0:
+        raise SystemExit("--max-pdf-bytes and --max-text-chars must be positive")
 
     categories = parse_categories(args.categories)
     conn = db_connect()

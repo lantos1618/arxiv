@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -19,9 +21,9 @@ import (
 	"gorm.io/gorm"
 )
 
-const sessionCookieName = "arxiv_session"
-const googleOAuthStateCookieName = "arxiv_google_oauth_state"
-const googleOAuthNextCookieName = "arxiv_google_oauth_next"
+const sessionCookieName = "__Host-arxiv_session"
+const googleOAuthStateCookieName = "__Host-arxiv_google_oauth_state"
+const googleOAuthNextCookieName = "__Host-arxiv_google_oauth_next"
 
 type googleOAuthConfig struct {
 	ClientID     string
@@ -54,12 +56,13 @@ type googleUserInfo struct {
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	next := safeNextPath(r.URL.Query().Get("next"))
-	if _, ok := s.currentUser(r); ok {
+	if _, ok := s.sessionUser(r); ok {
 		if next == "/" || next == "/login" {
 			next = "/account"
 		}
@@ -70,7 +73,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_, googleEnabled := configuredGoogleOAuth(r)
 	data := map[string]any{
 		"Title":         "Sign in",
-		"Description":   "Sign in to arXiv.gg with Google to use Deep Search, keep your reading history, and discover papers readers like you are opening.",
+		"Description":   "Sign in to arXiv.gg with Google to save your reading trail and use Deep Search.",
 		"Next":          next,
 		"GoogleEnabled": googleEnabled,
 	}
@@ -81,6 +84,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleGoogleOAuthStart(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -114,13 +118,14 @@ func (s *server) handleGoogleOAuthStart(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) handleGoogleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	cfg, ok := configuredGoogleOAuth(r)
 	if !ok {
-		http.Error(w, "Google sign-in is not configured", http.StatusServiceUnavailable)
+		http.Error(w, "sign-in is temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if msg := strings.TrimSpace(r.URL.Query().Get("error")); msg != "" {
@@ -134,7 +139,7 @@ func (s *server) handleGoogleOAuthCallback(w http.ResponseWriter, r *http.Reques
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	stateCookie, err := r.Cookie(googleOAuthStateCookieName)
-	if err != nil || state == "" || stateCookie.Value != state {
+	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(state)) != 1 {
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
@@ -196,74 +201,176 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.currentUser(r)
+	setPrivateNoStore(w)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user, ok := s.sessionUser(r)
 	if !ok {
 		http.Redirect(w, r, "/login?next=/account", http.StatusSeeOther)
 		return
 	}
+	s.renderAccountPage(w, r, user, "", "")
+}
+
+func (s *server) handleRegenerateAPIKey(w http.ResponseWriter, r *http.Request) {
+	setPrivateNoStore(w)
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user, ok := s.sessionUser(r)
+	if !ok {
+		http.Redirect(w, r, "/login?next=/account", http.StatusSeeOther)
+		return
+	}
+	existingKey, err := s.cache.ActiveUserAPIKey(r.Context(), user.ID, "Agent access")
+	if err != nil {
+		log.Printf("load api key before rotation failed: %v", err)
+		http.Error(w, "could not update API key", http.StatusInternalServerError)
+		return
+	}
+	if existingKey != nil && !apiKeyRotationConfirmed(r) {
+		s.renderAccountPage(w, r, user, "", "Confirm that rotating the key will revoke the current key.")
+		return
+	}
+	key, raw, err := s.cache.RegenerateUserAPIKey(r.Context(), user.ID, "Agent access")
+	if err != nil {
+		log.Printf("regenerate api key failed: %v", err)
+		http.Error(w, "could not regenerate API key", http.StatusInternalServerError)
+		return
+	}
+	_ = key
+	notice := "API key created. Copy it now; it is only shown on this screen."
+	if existingKey != nil {
+		notice = "API key rotated. The previous key is revoked. Copy the new key now; it is only shown on this screen."
+	}
+	s.renderAccountPage(w, r, user, raw, notice)
+}
+
+func apiKeyRotationConfirmed(r *http.Request) bool {
+	return r != nil && r.ParseForm() == nil && r.FormValue("confirm_rotation") == "rotate"
+}
+
+func (s *server) renderAccountPage(w http.ResponseWriter, r *http.Request, user *arxiv.User, rawAPIKey, apiKeyNotice string) {
+	setPrivateNoStore(w)
 	views, err := s.cache.RecentUserPaperViews(r.Context(), user.ID, 25)
 	if err != nil {
 		log.Printf("account recent views failed: %v", err)
 		views = []arxiv.UserPaperViewRow{}
 	}
 	peerViews, err := s.cache.ReadersLikeYouViews(r.Context(), user.ID, 12)
+	peerViewsSource := "personalized"
 	if err != nil {
 		log.Printf("account readers-like-you failed: %v", err)
 		peerViews = []arxiv.UserPaperViewRow{}
 	}
 	if len(peerViews) == 0 {
+		peerViewsSource = "community"
 		peerViews, err = s.cache.RecentCommunityPaperViews(r.Context(), 12)
 		if err != nil {
 			log.Printf("account community views failed: %v", err)
 			peerViews = []arxiv.UserPaperViewRow{}
 		}
 	}
+	apiKey, err := s.cache.ActiveUserAPIKey(r.Context(), user.ID, "Agent access")
+	if err != nil {
+		log.Printf("account api key lookup failed: %v", err)
+	}
 	s.renderTemplate(w, r, "account", map[string]any{
-		"Title":       "Account",
-		"User":        user,
-		"RecentViews": views,
-		"PeerViews":   peerViews,
+		"Title":           "Account",
+		"User":            user,
+		"RecentViews":     views,
+		"PeerViews":       peerViews,
+		"PeerViewsSource": peerViewsSource,
+		"APIKeyRecord":    apiKey,
+		"APIKey":          rawAPIKey,
+		"APIKeyMasked":    arxiv.MaskAPIKey(apiKey),
+		"APIKeyNotice":    apiKeyNotice,
 	})
 }
 
 func (s *server) currentUser(r *http.Request) (*arxiv.User, bool) {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+	if s.cache == nil {
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	user, err := s.cache.UserForSessionToken(ctx, cookie.Value)
-	if err != nil {
+	if apiKey := apiKeyFromRequest(r); apiKey != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		user, _, err := s.cache.UserForAPIKey(ctx, apiKey)
+		if err != nil {
+			if err != gorm.ErrRecordNotFound {
+				log.Printf("api key lookup failed: %v", err)
+			}
+			return nil, false
+		}
+		return user, true
+	}
+	return s.sessionUser(r)
+}
+
+func (s *server) sessionUser(r *http.Request) (*arxiv.User, bool) {
+	if s.cache == nil {
+		return nil, false
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err == nil && strings.TrimSpace(cookie.Value) != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		user, err := s.cache.UserForSessionToken(ctx, cookie.Value)
+		if err == nil {
+			return user, true
+		}
 		if err != gorm.ErrRecordNotFound {
 			log.Printf("session lookup failed: %v", err)
 		}
-		return nil, false
 	}
-	return user, true
+
+	return nil, false
+}
+
+func apiKeyFromRequest(r *http.Request) string {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(authHeader) > len("Bearer ") && strings.EqualFold(authHeader[:len("Bearer ")], "Bearer ") {
+		return strings.TrimSpace(authHeader[len("Bearer "):])
+	}
+	return strings.TrimSpace(r.Header.Get("X-API-Key"))
 }
 
 func (s *server) renderTemplate(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
-	if data == nil {
-		data = map[string]any{}
+	viewData := make(map[string]any, len(data)+8)
+	for key, value := range data {
+		viewData[key] = value
 	}
 	var currentUser *arxiv.User
-	if _, exists := data["CurrentUser"]; !exists {
+	if _, exists := viewData["CurrentUser"]; !exists {
 		if user, ok := s.currentUser(r); ok {
-			data["CurrentUser"] = user
+			viewData["CurrentUser"] = user
 			currentUser = user
 		}
-	} else if user, ok := data["CurrentUser"].(*arxiv.User); ok {
+	} else if user, ok := viewData["CurrentUser"].(*arxiv.User); ok {
 		currentUser = user
 	}
-	if _, exists := data["CurrentUserIsAdmin"]; !exists {
-		data["CurrentUserIsAdmin"] = s.userIsAdmin(currentUser) || s.hasAdminAccess(r)
+	if _, exists := viewData["CurrentUserIsAdmin"]; !exists {
+		viewData["CurrentUserIsAdmin"] = s.userIsAdmin(currentUser) || s.hasAdminCookieAccess(r)
 	}
-	data["BuildDate"] = buildDateLabel()
-	data["BuildCommit"] = buildCommitLabel()
-	if err := templates.ExecuteTemplate(w, name, data); err != nil {
+	viewData["BuildDate"] = buildDateLabel()
+	viewData["BuildCommit"] = buildCommitLabel()
+	if currentUser == nil && thirdPartyScriptsAllowed(r.URL.Path) {
+		viewData["GoogleAnalyticsID"] = s.googleAnalyticsID
+	}
+	viewData["BingSiteVerificationID"] = s.bingSiteVerificationID
+	viewData["SemanticAvailable"] = s.qwenExecutionConfigured()
+
+	var rendered bytes.Buffer
+	if err := templates.ExecuteTemplate(&rendered, name, viewData); err != nil {
 		log.Printf("render template %s failed: %v", name, err)
+		http.Error(w, "page unavailable", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = rendered.WriteTo(w)
 }
 
 func configuredGoogleOAuth(r *http.Request) (googleOAuthConfig, bool) {
@@ -272,17 +379,14 @@ func configuredGoogleOAuth(r *http.Request) (googleOAuthConfig, bool) {
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL")),
 	}
-	if file := strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CREDENTIALS_FILE")); file != "" {
+	hasEnvCredentials := cfg.ClientID != "" || cfg.ClientSecret != ""
+	if file := strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CREDENTIALS_FILE")); file != "" && !hasEnvCredentials {
 		fileCfg, err := readGoogleCredentialsFile(file)
 		if err != nil {
 			log.Printf("could not read GOOGLE_OAUTH_CREDENTIALS_FILE: %v", err)
 		} else {
-			if cfg.ClientID == "" {
-				cfg.ClientID = fileCfg.ClientID
-			}
-			if cfg.ClientSecret == "" {
-				cfg.ClientSecret = fileCfg.ClientSecret
-			}
+			cfg.ClientID = fileCfg.ClientID
+			cfg.ClientSecret = fileCfg.ClientSecret
 			if cfg.RedirectURL == "" {
 				cfg.RedirectURL = chooseGoogleRedirectURL(r, fileCfg.RedirectURL)
 			}
@@ -402,7 +506,7 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 		Path:     "/",
 		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -418,7 +522,7 @@ func setShortCookie(w http.ResponseWriter, r *http.Request, name, value string, 
 		Path:     "/",
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -430,7 +534,7 @@ func clearNamedCookie(w http.ResponseWriter, r *http.Request, name string) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -460,10 +564,26 @@ func safeNextPath(next string) string {
 	if next == "" {
 		return "/"
 	}
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, `\`) {
 		return "/"
 	}
 	return next
+}
+
+func setPrivateNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Pragma", "no-cache")
+	appendVary(w.Header(), "Cookie")
+	appendVary(w.Header(), "Authorization")
+}
+
+func thirdPartyScriptsAllowed(path string) bool {
+	return path != "/login" &&
+		path != "/account" &&
+		path != "/account/api-key/regenerate" &&
+		path != "/api/v1/" &&
+		!strings.HasPrefix(path, "/auth/") &&
+		!strings.HasPrefix(path, "/admin")
 }
 
 func randomCookieToken(n int) (string, error) {

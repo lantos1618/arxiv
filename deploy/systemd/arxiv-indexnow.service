@@ -1,0 +1,18 @@
+[Unit]
+Description=Submit queued changed URLs to IndexNow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=ARXIV_REPOSITORY=/opt/arxiv
+EnvironmentFile=-/etc/arxiv/indexnow.env
+ExecStart=/bin/sh -c 'cd "$ARXIV_REPOSITORY" && exec tools/run_indexnow_queue.sh'
+User=arxiv
+Group=arxiv
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arxiv
+TimeoutStartSec=10m

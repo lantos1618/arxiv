@@ -7,23 +7,22 @@
 	@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 </style>
 <h1>Search Results</h1>
-<div class="search-container semantic-tooltip-open">
+<div class="search-container">
 	<form class="search-bar" action="/search" method="get" id="search-form" role="search">
-		<input type="text" name="q" id="search-input" class="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off" aria-label="Search papers">
-		<input type="hidden" name="mode" value="{{if .SearchMode}}{{.SearchMode}}{{else}}search{{end}}">
+		<input type="text" name="q" id="search-input" class="search-input" placeholder="Search or paste arXiv ID/URL..." value="{{.Query}}" autocomplete="off" aria-label="Search papers" maxlength="500" required>
+		<input type="hidden" name="mode" value="quick">
 		<div class="search-buttons">
-			<button type="button" class="search-btn search-btn-keyword" id="btn-quick" title="Quick Search matches words, IDs, authors, and categories.">
+			<button type="button" class="search-btn search-btn-keyword" id="btn-quick" data-help="IDs, authors, keywords." aria-label="Quick search: IDs, authors, keywords">
 				<span class="btn-icon">⚡</span><span>Quick</span>
 			</button>
-			<button type="submit" class="search-btn search-btn-semantic" id="btn-semantic" aria-describedby="semantic-search-tooltip" aria-label="Search by idea across paper titles and abstracts">
-				<span class="btn-icon">🔎</span><span>Search</span>
+			<button type="button" class="search-btn search-btn-semantic" id="btn-semantic" aria-label="Search ideas across abstracts" {{if .SemanticAvailable}}data-help="Ideas across abstracts."{{else}}disabled aria-disabled="true" data-help="Semantic search is temporarily unavailable." title="Semantic search is temporarily unavailable."{{end}}>
+				<span class="btn-icon">🔎</span><span>Semantic</span>
 			</button>
-			<button type="button" class="search-btn search-btn-deep" id="btn-deep" title="Deep Search reads full paper text where available. Sign in; free while we test.">
+			<button type="button" class="search-btn search-btn-deep" id="btn-deep" aria-label="Deep search: full-paper text where available" {{if .SemanticAvailable}}data-help="Full-paper text where available."{{else}}disabled aria-disabled="true" data-help="Semantic search is temporarily unavailable." title="Semantic search is temporarily unavailable."{{end}}>
 				<span class="btn-icon">◎</span><span>Deep</span>
 			</button>
 		</div>
 	</form>
-	<div class="semantic-search-tooltip is-visible" id="semantic-search-tooltip" role="tooltip" data-semantic-tooltip>Search is for ideas, methods, and problems across paper abstracts. Use Quick for exact words or IDs. Use Deep for full-paper text when available.</div>
 </div>
 
 <p id="search-status">{{.SearchNotice}}</p>
@@ -47,13 +46,6 @@
 <div class="empty-state">
 	<h3>Search is warming up</h3>
 	<p>The abstract search catalog is still being prepared. Quick Search is available now.</p>
-	<div class="embedding-actions">
-		<div class="action-buttons">
-				<button class="btn btn-secondary" id="generate-embeddings-btn" data-help="Prepare the paper catalog for idea search and related-work recommendations.">Prepare Catalog</button>
-				<span id="embeddings-status" class="loading" style="display:none;">Preparing catalog...</span>
-		</div>
-		<p>CLI: <code>arxiv reindex --embeddings</code></p>
-	</div>
 </div>
 {{else}}
 	{{range .SemanticResults}}
@@ -66,7 +58,7 @@
 			<div class="paper-categories">{{range $i, $c := parseCategories .Paper.Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
 	</div>
 {{else}}
-	<p>No search results found.</p>
+	<p>No prepared abstracts matched this idea.</p>
 {{end}}
 {{end}}
 {{else}}
@@ -79,65 +71,25 @@
 			<div class="paper-categories">{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
 	</div>
 {{else}}
-<p>No results found.</p>
+<p>No cached papers matched this Quick Search.</p>
 {{end}}
 {{end}}
 </div>
 
 <script>
 (function() {
-	function setupSemanticTooltip() {
-		const tooltip = document.querySelector('[data-semantic-tooltip]');
-		const button = document.getElementById('btn-semantic');
-		if (!tooltip || !button) return;
-		const container = tooltip.closest('.search-container');
-		let dismissed = false;
-
-		function hideTooltip() {
-			if (dismissed) return;
-			dismissed = true;
-			tooltip.classList.remove('is-visible');
-			if (container) container.classList.remove('semantic-tooltip-open');
-			button.removeAttribute('aria-describedby');
-			document.removeEventListener('pointerdown', handlePageInteraction, true);
-			document.removeEventListener('keydown', handlePageInteraction, true);
-			document.removeEventListener('wheel', handlePageInteraction, true);
-			document.removeEventListener('input', handlePageInteraction, true);
-		}
-
-		function handlePageInteraction(e) {
-			if (button.contains(e.target) || tooltip.contains(e.target)) return;
-			hideTooltip();
-		}
-
-		function hideAfterHoverOrFocusLeaves() {
-			window.setTimeout(() => {
-				if (button.matches(':hover') || tooltip.matches(':hover') || document.activeElement === button) return;
-				hideTooltip();
-			}, 80);
-		}
-
-		document.addEventListener('pointerdown', handlePageInteraction, true);
-		document.addEventListener('keydown', handlePageInteraction, true);
-		document.addEventListener('wheel', handlePageInteraction, true);
-		document.addEventListener('input', handlePageInteraction, true);
-		button.addEventListener('click', hideTooltip);
-		button.addEventListener('mouseleave', hideAfterHoverOrFocusLeaves);
-		button.addEventListener('blur', hideAfterHoverOrFocusLeaves);
-		tooltip.addEventListener('mouseleave', hideAfterHoverOrFocusLeaves);
-	}
-
-	setupSemanticTooltip();
-
 	const form = document.getElementById('search-form');
 	const input = document.getElementById('search-input');
 	const statusEl = document.getElementById('search-status');
 	const paperContainer = document.getElementById('paper-results');
 	const btnSemantic = document.getElementById('btn-semantic');
 	let activeEventSource = null;
+	let semanticRetryTimer = null;
+	let searchGeneration = 0;
+	const maxSemanticRetries = 3;
 
 	const initialQuery = '{{.Query}}';
-	const initialMode = '{{if .IsDeep}}deep{{else if .IsSemantic}}search{{else}}quick{{end}}';
+	const initialMode = '{{if .IsDeep}}deep{{else if .IsSemantic}}Semantic{{else}}quick{{end}}';
 	const initialCount = {{if .IsDeep}}{{len .DeepResults}}{{else if .IsSemantic}}{{len .SemanticResults}}{{else}}{{len .Papers}}{{end}};
 	const authorDisplayLimit = 12;
 	const isSignedIn = {{if .CurrentUser}}true{{else}}false{{end}};
@@ -154,6 +106,7 @@
 
 		function semanticStatusText(message) {
 			const text = String(message || '');
+			if (/gpu/i.test(text)) return 'Semantic search preparation is queued.';
 			return /embedding|vector/i.test(text) ? 'Understanding the idea...' : text;
 		}
 
@@ -183,9 +136,28 @@
 			'<div class="paper-authors">' + renderAuthors(authors) + '</div><div class="paper-categories">' + cats + '</div>' + snippetHtml + '</div>';
 	}
 
-	function doStreamSearch(query, mode) {
-		const isSemantic = mode !== 'quick';
+	function cancelActiveSearch() {
+		searchGeneration++;
+		if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+		if (semanticRetryTimer) { clearTimeout(semanticRetryTimer); semanticRetryTimer = null; }
+	}
+
+	function doStreamSearch(query, mode, retry) {
+		if (!query.trim()) {
+			statusEl.style.display = '';
+			statusEl.style.color = '#dc2626';
+			statusEl.textContent = 'Enter a paper ID, author, keyword, or research idea.';
+			input.focus();
+			return;
+		}
+		const isSemantic = mode === 'semantic';
 		const isDeep = mode === 'deep';
+		const isAdvanced = isSemantic || isDeep;
+		const isRetry = Boolean(retry);
+		if (!isRetry) cancelActiveSearch();
+		const generation = isRetry ? retry.generation : searchGeneration;
+		const retryAttempt = isRetry ? retry.attempt : 0;
+		if (generation !== searchGeneration) return;
 		if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
 		statusEl.style.color = '';
 
@@ -195,12 +167,12 @@
 		}
 
 		let terminalEl = document.getElementById('search-terminal');
-		if (isSemantic) {
+		if (isAdvanced && !isRetry) {
 			if (!terminalEl) {
 				paperContainer.insertAdjacentHTML('beforebegin', '<div class="terminal active" id="search-terminal">' +
 					'<div class="terminal-header"><span class="terminal-dot red"></span><span class="terminal-dot yellow"></span>' +
-						'<span class="terminal-dot green"></span><span class="terminal-title">' + (isDeep ? 'deep search' : 'search') + '</span></div>' +
-							'<div class="terminal-body"><div class="terminal-line prompt">' + (isDeep ? 'deep search ' : 'search ') + '"' + escapeHtml(query) + '"</div>' +
+						'<span class="terminal-dot green"></span><span class="terminal-title">' + (isDeep ? 'deep search' : 'semantic search') + '</span></div>' +
+							'<div class="terminal-body"><div class="terminal-line prompt">' + (isDeep ? 'deep search ' : 'semantic search ') + '"' + escapeHtml(query) + '"</div>' +
 						'<div class="terminal-line info" id="terminal-status">' + (isDeep ? 'Reading full papers...' : 'Understanding the idea...') + '<span class="terminal-cursor"></span></div></div></div>');
 				terminalEl = document.getElementById('search-terminal');
 			} else {
@@ -208,21 +180,43 @@
 					document.getElementById('terminal-status').innerHTML = (isDeep ? 'Reading full papers...' : 'Understanding the idea...') + '<span class="terminal-cursor"></span>';
 			}
 			statusEl.style.display = 'none';
-		} else {
+		} else if (!isRetry) {
 			if (terminalEl) terminalEl.classList.remove('active');
 			statusEl.style.display = '';
 			statusEl.textContent = 'Searching...';
 		}
-		paperContainer.innerHTML = '';
+		if (!isRetry) paperContainer.innerHTML = '';
 
 		const params = new URLSearchParams({ q: query, limit: '100' });
 		params.append('mode', mode);
 
-		activeEventSource = new EventSource('/api/v1/search/stream?' + params.toString());
+		const eventSource = new EventSource('/api/v1/search/stream?' + params.toString());
+		activeEventSource = eventSource;
 		let resultCount = 0;
+		let fallbackUsed = false;
+		let retryRecommended = false;
+		let retryAfterSeconds = 30;
+		let firstSemanticResult = false;
+		let finished = false;
 		const terminalStatus = document.getElementById('terminal-status');
 
-		activeEventSource.onmessage = function(e) {
+		function scheduleSemanticRetry() {
+			if (!isSemantic || !retryRecommended || generation !== searchGeneration) return;
+			if (retryAttempt >= maxSemanticRetries) {
+				statusEl.textContent = 'Showing Quick results. Semantic search is temporarily unavailable.';
+				return;
+			}
+			const nextAttempt = retryAttempt + 1;
+			const delay = Math.min(Math.max(retryAfterSeconds, 1), 30);
+			statusEl.textContent = 'Showing Quick results. Retrying Semantic search in ' + delay + ' seconds...';
+			semanticRetryTimer = setTimeout(() => {
+				semanticRetryTimer = null;
+				doStreamSearch(query, 'semantic', { generation: generation, attempt: nextAttempt });
+			}, delay * 1000);
+		}
+
+		eventSource.onmessage = function(e) {
+			if (generation !== searchGeneration) return;
 			const data = JSON.parse(e.data);
 			switch (data.type) {
 				case 'start':
@@ -230,11 +224,29 @@
 					else statusEl.textContent = 'Searching...';
 					break;
 					case 'status':
-						if (isSemantic && terminalStatus) terminalStatus.innerHTML = semanticStatusText(data.message) + '<span class="terminal-cursor"></span>';
+						if (data.queued && isSemantic) {
+							fallbackUsed = true;
+							retryRecommended = true;
+							retryAfterSeconds = data.retryAfterSeconds || retryAfterSeconds;
+						}
+						if (isAdvanced && terminalStatus) terminalStatus.innerHTML = semanticStatusText(data.message) + '<span class="terminal-cursor"></span>';
 					else statusEl.textContent = data.message;
+					break;
+				case 'fallback':
+					fallbackUsed = true;
+					retryRecommended = Boolean(data.retry?.recommended);
+					retryAfterSeconds = data.retry?.afterSeconds || retryAfterSeconds;
+					if (terminalEl) terminalEl.classList.remove('active');
+					statusEl.style.display = '';
+					statusEl.textContent = data.message || 'Semantic search is unavailable; showing Quick results.';
 					break;
 				case 'result':
 					resultCount++;
+					if (isRetry && fallbackUsed) break;
+					if (isRetry && isSemantic && !firstSemanticResult) {
+						paperContainer.innerHTML = '';
+						firstSemanticResult = true;
+					}
 					if (terminalEl) terminalEl.classList.remove('active');
 					statusEl.style.display = '';
 					paperContainer.insertAdjacentHTML('beforeend', renderPaper(data.paper, data.similarity, data.snippet));
@@ -242,39 +254,47 @@
 					statusEl.textContent = resultCount + ' results...';
 					break;
 				case 'complete':
+					finished = true;
 					if (terminalEl) terminalEl.classList.remove('active');
 					statusEl.style.display = '';
-						statusEl.textContent = data.count + ' ' + modeLabel(data.mode) + ' results for "' + escapeHtml(query) + '"';
-					activeEventSource.close(); activeEventSource = null;
+					if (activeEventSource === eventSource) activeEventSource = null;
+					eventSource.close();
+					if (fallbackUsed) scheduleSemanticRetry();
+					else if (isRetry && resultCount === 0) statusEl.textContent = 'No Semantic results found; keeping Quick results.';
+					else statusEl.textContent = data.count + ' ' + modeLabel(data.mode) + ' results for "' + query + '"';
 					break;
 				case 'error':
 					if (terminalEl) terminalEl.classList.remove('active');
 					statusEl.style.display = '';
 					statusEl.textContent = data.error;
 					statusEl.style.color = '#dc2626';
-					activeEventSource.close(); activeEventSource = null;
+					eventSource.close();
+					if (activeEventSource === eventSource) activeEventSource = null;
 					break;
 			}
 		};
-		activeEventSource.onerror = function() {
+		eventSource.onerror = function() {
+			if (finished || generation !== searchGeneration) return;
 			if (resultCount === 0) { statusEl.textContent = 'Search failed'; statusEl.style.color = '#dc2626'; }
-			if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+			eventSource.close();
+			if (activeEventSource === eventSource) activeEventSource = null;
+			if (fallbackUsed) scheduleSemanticRetry();
 		};
 	}
 
 	function modeLabel(mode) {
 		if (mode === 'deep') return 'deep';
 		if (mode === 'quick') return 'quick';
-		return 'search';
+		return 'Semantic';
 	}
 
 	form.addEventListener('submit', function(e) {
 		e.preventDefault();
 		const query = input.value.trim();
 		if (query) {
-			history.pushState(null, '', '/search?q=' + encodeURIComponent(query));
-			doStreamSearch(query, 'search');
-		}
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=quick');
+			doStreamSearch(query, 'quick');
+		} else doStreamSearch(query, 'quick');
 	});
 
 	document.getElementById('btn-quick').addEventListener('click', function() {
@@ -288,8 +308,8 @@
 	btnSemantic.addEventListener('click', function() {
 		const query = input.value.trim();
 		if (query) {
-			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=search');
-			doStreamSearch(query, 'search');
+			history.pushState(null, '', '/search?q=' + encodeURIComponent(query) + '&mode=semantic');
+			doStreamSearch(query, 'semantic');
 		}
 	});
 
@@ -301,29 +321,8 @@
 		}
 	});
 
-	const genBtn = document.getElementById('generate-embeddings-btn');
-	const genStatus = document.getElementById('embeddings-status');
-	if (genBtn) {
-		genBtn.addEventListener('click', async function() {
-			if (genStatus.dataset.generating) return;
-			genStatus.style.display = 'inline';
-			genStatus.dataset.generating = 'true';
-			genStatus.textContent = 'Preparing catalog...';
-			genBtn.disabled = true;
-			try {
-				const response = await fetch('/api/v1/embeddings/generate', { method: 'POST' });
-				if (!response.ok) throw new Error('Failed');
-				const data = await response.json();
-				genStatus.textContent = 'Prepared ' + (data.data?.count || 0) + ' papers!';
-				setTimeout(() => window.location.reload(), 1500);
-			} catch (err) {
-				genStatus.textContent = 'Error: ' + err.message;
-				genStatus.style.color = '#dc2626';
-				genBtn.disabled = false;
-				delete genStatus.dataset.generating;
-			}
-		});
-	}
+	input.addEventListener('input', cancelActiveSearch);
+
 })();
 </script>
 {{template "foot" .}}

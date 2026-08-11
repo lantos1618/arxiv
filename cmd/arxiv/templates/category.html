@@ -12,7 +12,7 @@
 		<div class="paper-categories">{{range $i, $c := parseCategories .Categories}}{{if $i}} {{end}}<a class="cat-link" href="{{categoryPath $c}}" data-help="Open this arXiv subject area.">{{$c}}</a>{{end}}</div>
 	</div>
 {{else}}
-<p>No papers in this category.</p>
+<p>No cached papers are available in this category.</p>
 {{end}}
 {{template "foot" .}}
 {{end}}

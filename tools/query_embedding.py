@@ -8,6 +8,9 @@ import sys
 import json
 import os
 
+if os.environ.get("ALLOW_LEGACY_MINILM_MIGRATION") != "1":
+    raise SystemExit("legacy MiniLM query utility is archived; Qwen is canonical")
+
 # Add tools directory to path
 sys.path.append('/home/ubuntu/arxiv/tools')
 

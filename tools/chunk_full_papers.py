@@ -207,6 +207,17 @@ def main():
     parser.add_argument("--refresh-existing", action="store_true")
     args = parser.parse_args()
 
+    if args.limit <= 0:
+        raise SystemExit("--limit must be positive")
+    if args.select_batch_size <= 0:
+        raise SystemExit("--select-batch-size must be positive")
+    if args.chunk_chars <= 0:
+        raise SystemExit("--chunk-chars must be positive")
+    if args.overlap_chars < 0 or args.overlap_chars >= args.chunk_chars:
+        raise SystemExit("--overlap-chars must be non-negative and smaller than --chunk-chars")
+    if not args.scope.strip():
+        raise SystemExit("--scope must not be empty")
+
     conn = db_connect()
     ensure_schema(conn)
     processed = 0

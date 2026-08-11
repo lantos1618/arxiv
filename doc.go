@@ -1,34 +1,31 @@
-// Package arxiv provides tools for managing a complete offline cache of arXiv papers.
+// Package arxiv provides a local arXiv metadata cache, search index, download
+// manager, citation graph, and optional semantic-search storage.
 //
-// This package implements:
-//   - OAI-PMH client for harvesting paper metadata
-//   - PDF and TeX source download functionality
-//   - Local SQLite-based indexing for fast search
-//   - Incremental sync to keep the cache up to date
+// Open creates the cache directory and uses SQLite by default. When DATABASE_URL
+// is set, Open uses PostgreSQL instead. Metadata synchronization uses arXiv's
+// OAI-PMH endpoint and stores resumable synchronization state. PDFs and TeX
+// sources are downloaded only when explicitly requested through DownloadPaper
+// or FetchAndDownload; a metadata sync does not create a complete offline mirror.
 //
-// arXiv contains ~2.4 million papers (as of 2024). A full cache requires:
-//   - Metadata: ~10GB
-//   - PDFs: ~10TB
-//   - TeX sources: ~2TB
-//
-// The cache supports incremental updates via OAI-PMH resumption tokens
-// and tracks download state to resume interrupted syncs.
-//
-// Basic usage:
+// A minimal metadata synchronization looks like:
 //
 //	cache, err := arxiv.Open("/path/to/cache")
 //	if err != nil {
-//		log.Fatal(err)
+//		return err
 //	}
 //	defer cache.Close()
 //
-//	// Sync metadata from arXiv
-//	if err := cache.SyncMetadata(ctx); err != nil {
-//		log.Fatal(err)
+//	opts := &arxiv.SyncOptions{BatchSize: 1000}
+//	if err := cache.SyncMetadata(ctx, opts); err != nil {
+//		return err
 //	}
 //
-//	// Download papers for a specific category
-//	if err := cache.DownloadCategory(ctx, "cs.AI"); err != nil {
-//		log.Fatal(err)
+// Fetching metadata and both available artifact types for one paper looks like:
+//
+//	opts := &arxiv.DownloadOptions{DownloadPDF: true, DownloadSource: true}
+//	paper, err := cache.FetchAndDownload(ctx, "2301.00001", opts)
+//	if err != nil {
+//		return err
 //	}
+//	fmt.Println(paper.Title)
 package arxiv
